@@ -37,6 +37,14 @@ npm run dev
 The dev server runs at <http://localhost:5173>. Copy `.env.example` to `.env` if
 you need to change defaults.
 
+If Vite reports `504 (Outdated Optimize Dep)` after a dependency change, clear
+the optimized-dependency cache and restart:
+
+```bash
+rm -rf node_modules/.vite
+npm run dev
+```
+
 ## Environment
 
 | Variable                     | Default                        | Purpose                                      |
