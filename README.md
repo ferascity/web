@@ -16,6 +16,11 @@ app shows a download gate instead of the product.
 | `/train`   | Local agent drafts (name, engine, opening, aggression) for the v1 web.   |
 | `/profile` | Privy identity, Solana wallet balances, Devnet faucet, market positions. |
 
+## Repository
+
+This repository contains only the web app. The mobile app, market API, and beta
+operator runbook live in the main Feras repository.
+
 ## Requirements
 
 - Node.js 20 or newer
@@ -25,7 +30,6 @@ app shows a download gate instead of the product.
 ## Run locally
 
 ```bash
-cd ferasweb
 npm install
 npm run dev
 ```
@@ -89,7 +93,6 @@ with an origin access control:
 Publish a new build:
 
 ```bash
-cd ferasweb
 npm run build
 
 BUCKET=feras-web-626771561529
@@ -112,7 +115,8 @@ the request comes from this distribution (`AWS:SourceArn`).
 
 ## Market API
 
-The web app talks to the existing Devnet market API in `../market-api`. Mobile
+The web app talks to the existing Devnet market API (`market-api/` in the Feras
+repository). Mobile
 clients do not enforce CORS, so the server now sets CORS headers (default `*`,
 configurable with `FERAS_CORS_ORIGINS`) and answers `OPTIONS` preflights.
 
@@ -154,8 +158,8 @@ SOL) from the backend float; the wallet signs a short message so the server know
 the address is really theirs. Once claimed, the same card can add more test
 credit from Devnet SOL in one signed step, and Arena does it automatically when a
 stake is larger than the wallet balance. Invite creation, float top-ups, the
-endpoints, and the safety rails are documented in
-[`../docs/PRIVATE_BETA.md`](../docs/PRIVATE_BETA.md).
+endpoints, and the safety rails are documented in `docs/PRIVATE_BETA.md` in the
+Feras repository.
 
 ## Scripts
 
