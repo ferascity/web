@@ -57,18 +57,46 @@ export function AppShell() {
             <span className="footer-sep">·</span>
             <span>Autonomous chess on Solana</span>
           </div>
-          <div className="footer-links">
-            <Link to="/arena">Arena</Link>
-            <Link to="/train">Train</Link>
-            <Link to="/profile">Profile</Link>
-            <a
-              href="https://explorer.solana.com/?cluster=devnet"
-              target="_blank"
-              rel="noreferrer"
-            >
-              Explorer
-              <Icon name="arrow-up-right" size={11} />
-            </a>
+          <div className="footer-right">
+            <div className="footer-links">
+              <Link to="/arena">Arena</Link>
+              <Link to="/train">Train</Link>
+              <Link to="/profile">Profile</Link>
+              <a
+                href="https://explorer.solana.com/?cluster=devnet"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Explorer
+                <Icon name="arrow-up-right" size={11} />
+              </a>
+            </div>
+            <div className="footer-social">
+              <a
+                href="https://x.com/ferascity"
+                target="_blank"
+                rel="noreferrer"
+                aria-label="Feras on X"
+              >
+                <Icon name="x" size={13} fill="currentColor" stroke="none" />
+              </a>
+              <a
+                href="https://github.com/ferascity"
+                target="_blank"
+                rel="noreferrer"
+                aria-label="Feras on GitHub"
+              >
+                <Icon name="github" size={15} fill="currentColor" stroke="none" />
+              </a>
+              <a
+                href="https://youtube.com/@ferascity"
+                target="_blank"
+                rel="noreferrer"
+                aria-label="Feras on YouTube"
+              >
+                <Icon name="youtube" size={16} fill="currentColor" stroke="none" />
+              </a>
+            </div>
           </div>
         </div>
       </footer>

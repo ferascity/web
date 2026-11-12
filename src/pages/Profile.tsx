@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Icon } from '../components/Icon';
 import { BetaCreditsCard } from '../components/BetaCreditsCard';
-import { getPositions } from '../lib/api/positions';
+import { getPositions, type SettlementKind } from '../lib/api/positions';
 import {
   formatMultiplier,
   formatRelativeTime,
@@ -30,6 +30,7 @@ export function Profile() {
     login,
     logout,
     createWallet,
+    settlePosition,
     requestDevnetSol,
   } = useWallet();
 
@@ -43,6 +44,12 @@ export function Profile() {
   const [airdropMessage, setAirdropMessage] = useState<string | null>(null);
   const [walletStatus, setWalletStatus] = useState<AsyncStatus>('idle');
   const [walletMessage, setWalletMessage] = useState<string | null>(null);
+
+  const [settlingId, setSettlingId] = useState<string | null>(null);
+  const [settleNotice, setSettleNotice] = useState<{
+    tone: 'success' | 'error';
+    text: string;
+  } | null>(null);
 
   useEffect(() => {
     if (!address) {
@@ -105,8 +112,34 @@ export function Profile() {
     }
   };
 
-  const handleCreateWallet = async () => {
-    setWalletStatus('loading');
+  const handleSettle = async (position: MarketPosition, kind: SettlementKind) => {
+    setSettlingId(position.id);
+    setSettleNotice(null);
+    try {
+      const receipt = await settlePosition(position, kind);
+      setSettleNotice({
+        tone: 'success',
+        text:
+          kind === 'refund'
+            ? `Refund confirmed on-chain · ${shortAddress(receipt.signature ?? '', 6)}`
+            : `Payout claimed on-chain · ${shortAddress(receipt.signature ?? '', 6)}`,
+      });
+      setPositionsNonce((value) => value + 1);
+      refreshBalances();
+    } catch (error) {
+      setSettleNotice({
+        tone: 'error',
+        text:
+          error instanceof Error
+            ? error.message
+            : `The ${kind} could not be completed.`,
+      });
+    } finally {
+      setSettlingId(null);
+    }
+  };
+
+  const handleCreateWallet = async () => {    setWalletStatus('loading');
     setWalletMessage(null);
     try {
       await createWallet();
@@ -388,6 +421,13 @@ export function Profile() {
             </div>
           ) : null}
 
+          {settleNotice ? (
+            <div className={`notice${settleNotice.tone === 'error' ? ' error' : ''}`}>
+              <Icon name={settleNotice.tone === 'error' ? 'alert' : 'check'} />
+              <span>{settleNotice.text}</span>
+            </div>
+          ) : null}
+
           {positionsStatus === 'loading' ? (
             <div className="position-list">
               {[0, 1, 2].map((index) => (
@@ -443,11 +483,32 @@ export function Profile() {
                     <div
                       className={`position-return${position.status === 'WON' ? ' won' : ''}`}
                     >
-                      {position.status === 'WON'
-                        ? formatUsdc(position.estimatedReturnUsdc)
-                        : formatMultiplier(position.estimatedMultiplier)}
+                      {position.status === 'WON' || position.status === 'CLAIMED'
+                        ? formatUsdc(position.payoutUsdc ?? position.estimatedReturnUsdc)
+                        : position.status === 'REFUNDED'
+                          ? formatUsdc(position.stakeUsdc)
+                          : formatMultiplier(position.estimatedMultiplier)}
                     </div>
                   </div>
+                  {position.canClaim || position.canRefund ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm position-settle"
+                      disabled={settlingId !== null}
+                      onClick={() =>
+                        handleSettle(position, position.canRefund ? 'refund' : 'claim')
+                      }
+                    >
+                      {settlingId === position.id ? <span className="spinner" /> : null}
+                      {settlingId === position.id
+                        ? position.canRefund
+                          ? 'Refunding'
+                          : 'Claiming'
+                        : position.canRefund
+                          ? 'Refund'
+                          : 'Claim'}
+                    </button>
+                  ) : null}
                   {position.receipt.explorerUrl ? (
                     <a
                       className="icon-btn"

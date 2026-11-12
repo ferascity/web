@@ -78,6 +78,8 @@ export interface Match {
   blackAgent: Agent;
   currentPly: number;
   totalPlies?: number;
+  moveCount?: number;
+  hasReplay?: boolean;
   timeControl: string;
   viewerCount: number;
   poolVolumeUsdc: number;
@@ -90,10 +92,15 @@ export interface Match {
   marketAddress?: string;
   vaultAddress?: string;
   marketLockTime?: string | null;
-  isDemo?: boolean;
 }
 
-export type PositionStatus = 'ACTIVE' | 'WON' | 'LOST' | 'CANCELLED';
+export type PositionStatus =
+  | 'ACTIVE'
+  | 'WON'
+  | 'LOST'
+  | 'CANCELLED'
+  | 'CLAIMED'
+  | 'REFUNDED';
 
 export interface TransactionReceipt {
   signature: string | null;
@@ -111,7 +118,13 @@ export interface MarketPosition {
   stakeUsdc: number;
   estimatedMultiplier: number;
   estimatedReturnUsdc: number;
+  payoutUsdc?: number;
   status: PositionStatus;
+  claimed?: boolean;
+  refunded?: boolean;
+  canClaim?: boolean;
+  canRefund?: boolean;
+  claimDeadline?: string;
   placedAt: string;
   settledAt?: string;
   receipt: TransactionReceipt;

@@ -11,11 +11,13 @@ import {
   formatUsdc,
 } from '../lib/format';
 import { getBetaStatus, type BetaStatus } from '../lib/api/beta';
+import { loadMatchReplay } from '../lib/api/matches';
 import { useMatches } from '../lib/hooks/useMatches';
 import { useWallet } from '../lib/wallet';
 import type {
   MarketOutcome,
   Match,
+  MoveStep,
   PositionDraft,
   TransactionReceipt,
 } from '../lib/types';
@@ -51,7 +53,11 @@ export function Arena() {
   const requestedId = searchParams.get('match');
   const match = matches.find((item) => item.id === requestedId) ?? matches[0] ?? null;
 
-  const moves = match?.replay.moves ?? [];
+  const [replayMoves, setReplayMoves] = useState<MoveStep[]>([]);
+  const [replayStatus, setReplayStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>(
+    'idle',
+  );
+  const moves = replayMoves;
 
   const [ply, setPly] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -89,6 +95,36 @@ export function Arena() {
 
   const matchId = match?.id ?? null;
   const moveCount = moves.length;
+
+  // Replays are fetched only for the selected match. The list endpoint used to
+  // ship every analyzed move for every match, which made the arena wait on a
+  // 12 MB payload before it could render a board.
+  useEffect(() => {
+    if (!match) {
+      setReplayMoves([]);
+      setReplayStatus('idle');
+      return;
+    }
+    let cancelled = false;
+    setReplayMoves([]);
+    setReplayStatus(match.hasReplay ? 'loading' : 'ready');
+    if (!match.hasReplay) return;
+
+    loadMatchReplay(match.id)
+      .then((replay) => {
+        if (cancelled) return;
+        setReplayMoves(replay.moves);
+        setReplayStatus('ready');
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setReplayStatus('error');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [match]);
 
   useEffect(() => {
     setPly(moveCount);
@@ -164,7 +200,7 @@ export function Arena() {
           <h3>The arena is quiet</h3>
           <p>
             {apiError
-              ? 'The Devnet market API could not be reached and no demo matches are available.'
+              ? 'The Devnet market API could not be reached.'
               : 'No matches were returned by the market API.'}
           </p>
           <button type="button" className="btn btn-secondary btn-sm" onClick={reload}>
@@ -199,7 +235,7 @@ export function Arena() {
   const validStake = Number.isFinite(stake) && stake >= 0.01;
   const multiplier = multiplierFor(match, outcome);
   const estimatedReturn = validStake ? stake * multiplier : 0;
-  const tradable = !match.isDemo && match.status !== 'COMPLETED';
+  const tradable = match.status !== 'COMPLETED';
   const balancePending = Boolean(address) && balanceStatus === 'loading';
   const insufficient =
     balanceStatus === 'ready' && validStake && usdcBalance < stake;
@@ -283,9 +319,7 @@ export function Arena() {
   if (!authenticated) ctaLabel = 'Sign in to take a position';
   else if (!address) ctaLabel = 'Preparing wallet…';
   else if (!tradable) {
-    ctaLabel = match.isDemo
-      ? 'Demo match — trading unavailable'
-      : 'Market settled';
+    ctaLabel = 'Market settled';
   } else if (balancePending) ctaLabel = 'Checking balance…';
   else if (!validStake) ctaLabel = 'Enter a stake';
   else if (insufficient) {
@@ -311,15 +345,16 @@ export function Arena() {
               </div>
               <div className="arena-board-sub">
                 {match.timeControl} · Ply {match.currentPly}
-                {moves.length === 0
-                  ? match.isDemo
-                    ? ' · Bundled demo · No replay'
-                    : ' · Replay unavailable'
-                  : ''}
+                {replayStatus === 'loading'
+                  ? ' · Loading replay…'
+                  : replayStatus === 'error'
+                    ? ' · Replay unavailable'
+                    : moves.length === 0
+                      ? ' · No replay yet'
+                      : ''}
               </div>
             </div>
             <div className="arena-board-tools">
-              {match.isDemo ? <span className="badge demo">Demo</span> : null}
               <StatusBadge match={match} />
               {matches.length > 0 ? (
                 <select
@@ -448,14 +483,10 @@ export function Arena() {
           <div className="card rail-card market-card">
             <div className="rail-head">
               <span className="rail-title">Market</span>
-              {match.isDemo ? (
-                <span className="badge demo">Demo</span>
-              ) : (
-                <span className="badge soft">
-                  <span className="dot live" />
-                  Open
-                </span>
-              )}
+              <span className="badge soft">
+                <span className={`dot${match.status === 'COMPLETED' ? '' : ' live'}`} />
+                {match.status === 'COMPLETED' ? 'Settled' : 'Open'}
+              </span>
             </div>
 
             <div className="outcome-grid">
@@ -593,9 +624,8 @@ export function Arena() {
               </button>
 
               <p className="market-note">
-                {match.isDemo
-                  ? 'Bundled demo match. Start the Devnet market API and load a registered market to place positions.'
-                  : 'Devnet only. Positions are recorded on Solana and settle when the match ends. Multipliers are estimates, not guarantees.'}
+                Devnet only. Positions are recorded on Solana and settle when the match
+                ends. Multipliers are estimates, not guarantees.
               </p>
             </div>
           </div>

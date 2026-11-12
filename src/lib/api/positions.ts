@@ -13,6 +13,8 @@ import type {
 } from '../types';
 
 const PLACE_POSITION_DISCRIMINATOR = [218, 31, 90, 75, 101, 209, 5, 253];
+const CLAIM_DISCRIMINATOR = [62, 198, 214, 193, 213, 159, 108, 210];
+const CLAIM_REFUND_DISCRIMINATOR = [15, 16, 30, 161, 255, 228, 97, 60];
 const REQUEST_TIMEOUT_MS = 12000;
 const outcomeValue: Record<MarketOutcome, number> = { WHITE: 0, DRAW: 1, BLACK: 2 };
 
@@ -146,7 +148,13 @@ export async function requestPositionTransaction(
 }
 
 function normalizeStatus(value: unknown): PositionStatus {
-  return value === 'WON' || value === 'LOST' || value === 'CANCELLED' ? value : 'ACTIVE';
+  return value === 'WON' ||
+    value === 'LOST' ||
+    value === 'CANCELLED' ||
+    value === 'CLAIMED' ||
+    value === 'REFUNDED'
+    ? value
+    : 'ACTIVE';
 }
 
 function normalizeOutcome(value: unknown): MarketOutcome {
@@ -171,7 +179,14 @@ function normalizePosition(value: unknown): MarketPosition | null {
       typeof raw.estimatedMultiplier === 'number' ? raw.estimatedMultiplier : 0,
     estimatedReturnUsdc:
       typeof raw.estimatedReturnUsdc === 'number' ? raw.estimatedReturnUsdc : 0,
+    payoutUsdc: typeof raw.payoutUsdc === 'number' ? raw.payoutUsdc : undefined,
     status: normalizeStatus(raw.status),
+    claimed: raw.claimed === true,
+    refunded: raw.refunded === true,
+    canClaim: raw.canClaim === true,
+    canRefund: raw.canRefund === true,
+    claimDeadline:
+      typeof raw.claimDeadline === 'string' ? raw.claimDeadline : undefined,
     placedAt: typeof raw.placedAt === 'string' ? raw.placedAt : new Date(0).toISOString(),
     settledAt: typeof raw.settledAt === 'string' ? raw.settledAt : undefined,
     receipt: {
@@ -197,4 +212,86 @@ export async function getPositions(owner: string): Promise<MarketPosition[]> {
   return payload
     .map(normalizePosition)
     .filter((position): position is MarketPosition => position !== null);
+}
+
+export type SettlementKind = 'claim' | 'refund';
+
+/**
+ * Build the claim or refund instruction for a settled/cancelled position.
+ *
+ * The program pins the payout to the owner's associated token account and does
+ * not require the owner to sign, but the connected wallet still pays the fee and
+ * signs the transaction. Every field is re-validated here before signing.
+ */
+export async function requestSettlementTransaction(
+  positionId: string,
+  owner: string,
+  kind: SettlementKind,
+): Promise<PositionTransaction> {
+  const response = await fetch(`${CONFIG.marketApiUrl}/v1/positions/settlement/transaction`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    body: JSON.stringify({ owner, position: positionId, kind }),
+  });
+
+  if (!response.ok) {
+    let message = `Market API could not prepare the ${kind} (${response.status}).`;
+    try {
+      const body = (await response.json()) as { error?: string };
+      if (body?.error) message = body.error;
+    } catch {
+      // keep the status message
+    }
+    throw new Error(message);
+  }
+
+  const payload = (await response.json()) as PositionTransactionResponse;
+  if (
+    !payload.correlationId ||
+    !Array.isArray(payload.instructions) ||
+    payload.instructions.length !== 1
+  ) {
+    throw new Error('The market API returned an invalid settlement request.');
+  }
+
+  const expected =
+    kind === 'refund' ? CLAIM_REFUND_DISCRIMINATOR : CLAIM_DISCRIMINATOR;
+  const instruction = payload.instructions[0];
+  if (instruction.programId !== CONFIG.programId) {
+    throw new Error('Rejected settlement: unexpected program address.');
+  }
+  if (instruction.accounts.length !== 8) {
+    throw new Error('Rejected settlement: unexpected account layout.');
+  }
+  const data = decodeBase64(instruction.dataBase64);
+  const discriminatorMatches = expected.every((byte, index) => data[index] === byte);
+  if (!discriminatorMatches || data.length !== 8) {
+    throw new Error('Rejected settlement: not a Feras claim instruction.');
+  }
+  const [, market, position, ownerToken, vault, mint, ownerAccount] =
+    instruction.accounts;
+  if (position.address !== positionId) {
+    throw new Error('Rejected settlement: position account mismatch.');
+  }
+  if (ownerAccount.address !== owner) {
+    throw new Error('Rejected settlement: wallet mismatch.');
+  }
+  if (mint.address !== CONFIG.usdcMint) {
+    throw new Error('Rejected settlement: Devnet test-USDC mint mismatch.');
+  }
+  if (!market.isWritable || !position.isWritable || !ownerToken.isWritable || !vault.isWritable) {
+    throw new Error('Rejected settlement: unexpected writable accounts.');
+  }
+
+  return {
+    correlationId: payload.correlationId,
+    instructions: [
+      new TransactionInstruction({
+        programId: new PublicKey(instruction.programId),
+        keys: instruction.accounts.map(accountMeta),
+        data: Buffer.from(data),
+      }),
+    ],
+  };
 }

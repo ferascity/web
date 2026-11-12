@@ -1010,6 +1010,13 @@
   color: var(--emerald-bright);
 }
 
+.position-settle {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 12px;
+  font-size: 11px;
+}
+
 .outcome-tag {
   display: inline-flex;
   align-items: center;
@@ -1093,7 +1100,7 @@
 
 /* ── Additions for interactive pages ────────────────────────── */
 
-.demo-error {
+.notice-detail {
   display: inline;
   color: var(--amber);
 }

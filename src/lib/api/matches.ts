@@ -1,4 +1,3 @@
-import demoMatchesRaw from '../../data/demo-matches.json';
 import { CONFIG } from '../config';
 import type {
   Agent,
@@ -14,7 +13,7 @@ const REQUEST_TIMEOUT_MS = 9000;
 
 export interface MatchesResult {
   matches: Match[];
-  source: 'live' | 'demo';
+  source: 'live';
   error: string | null;
 }
 
@@ -42,15 +41,15 @@ function fallbackAgent(color: 'White' | 'Black', matchId: string): Agent {
     tier: 'ENGINE',
     status: 'IN_MATCH',
     stats: {
-      elo: 2500,
-      peakElo: 2500,
+      elo: 0,
+      peakElo: 0,
       winRate: 0,
-      favoredOpening: 'Devnet opening book',
+      favoredOpening: 'Stockfish',
     },
     architecture: {
-      baseModel: 'Feras engine',
+      baseModel: 'Stockfish',
       parameters: 'Devnet',
-      searchAlgorithm: 'On-chain market replay',
+      searchAlgorithm: 'UCI',
       evalDepth: 0,
     },
     earningsSol: 0,
@@ -160,7 +159,7 @@ function normalizeCategory(value: unknown): MatchCategory {
     value === 'BENCHMARK' ||
     value === 'DEVNET'
     ? value
-    : 'HIGH_STAKES';
+    : 'BENCHMARK';
 }
 
 export function normalizeMatch(value: unknown): Match {
@@ -173,6 +172,11 @@ export function normalizeMatch(value: unknown): Match {
     raw.result === 'WHITE' || raw.result === 'DRAW' || raw.result === 'BLACK'
       ? raw.result
       : null;
+  const replay = normalizeReplay(raw.replay, id);
+  const moveCount = numberValue(
+    raw.moveCount,
+    replay.moves.length || numberValue(raw.currentPly, 0),
+  );
 
   return {
     id,
@@ -183,13 +187,15 @@ export function normalizeMatch(value: unknown): Match {
     blackAgent,
     currentPly: numberValue(raw.currentPly, 0),
     totalPlies: numberValue(raw.totalPlies, 0),
+    moveCount,
+    hasReplay: raw.hasReplay === true || replay.moves.length > 0,
     timeControl: stringValue(raw.timeControl, 'Devnet'),
     viewerCount: numberValue(raw.viewerCount, 0),
     poolVolumeUsdc: numberValue(raw.poolVolumeUsdc, 0),
     marketEstimates: {
-      whiteMultiplier: numberValue(estimates.whiteMultiplier, 2),
-      drawMultiplier: numberValue(estimates.drawMultiplier, 3),
-      blackMultiplier: numberValue(estimates.blackMultiplier, 2),
+      whiteMultiplier: numberValue(estimates.whiteMultiplier, 0),
+      drawMultiplier: numberValue(estimates.drawMultiplier, 0),
+      blackMultiplier: numberValue(estimates.blackMultiplier, 0),
       lastTickDirection:
         estimates.lastTickDirection === 'UP' ||
         estimates.lastTickDirection === 'DOWN' ||
@@ -198,7 +204,7 @@ export function normalizeMatch(value: unknown): Match {
           : undefined,
     },
     currentFen: stringValue(raw.currentFen, INITIAL_FEN),
-    replay: normalizeReplay(raw.replay, id),
+    replay,
     startedAt: stringValue(raw.startedAt, new Date().toISOString()),
     evalScore: numberValue(raw.evalScore, 0),
     result,
@@ -229,31 +235,25 @@ export function sortMatches(matches: Match[]): Match[] {
   return [...matches].sort((a, b) => {
     const byStatus = weight[a.status] - weight[b.status];
     if (byStatus !== 0) return byStatus;
-    return new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime();
+    const aTime = new Date(a.marketLockTime ?? a.startedAt).getTime();
+    const bTime = new Date(b.marketLockTime ?? b.startedAt).getTime();
+    return bTime - aTime;
   });
 }
 
-export function demoMatches(): Match[] {
-  return (demoMatchesRaw as unknown[]).map((match) => ({
-    ...normalizeMatch(match),
-    isDemo: true,
-  }));
-}
-
+/**
+ * The list endpoint intentionally ships no move payloads: one analyzed match
+ * can be hundreds of kilobytes, and the arena only needs the selected one.
+ */
 export async function loadMatches(status?: MatchStatus): Promise<MatchesResult> {
   const query = status ? `?status=${status}` : '';
   try {
     const matches = await request(`/v1/matches${query}`);
-    const mapped = sortMatches(matches.map((match) => ({ ...match, isDemo: false })));
-    if (mapped.length === 0 && !status) {
-      return { matches: demoMatches(), source: 'demo', error: null };
-    }
-    return { matches: mapped, source: 'live', error: null };
+    return { matches: sortMatches(matches), source: 'live', error: null };
   } catch (error) {
-    const demo = demoMatches().filter((match) => !status || match.status === status);
     return {
-      matches: sortMatches(demo),
-      source: 'demo',
+      matches: [],
+      source: 'live',
       error:
         error instanceof Error
           ? error.message
@@ -270,4 +270,16 @@ export async function loadMatch(id: string): Promise<Match | null> {
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`Market API responded with ${response.status}`);
   return normalizeMatch(await response.json());
+}
+
+export async function loadMatchReplay(id: string): Promise<GameReplay> {
+  const response = await fetch(
+    `${CONFIG.marketApiUrl}/v1/matches/${encodeURIComponent(id)}/replay`,
+    {
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      headers: { Accept: 'application/json' },
+    },
+  );
+  if (!response.ok) throw new Error(`Replay request failed (${response.status})`);
+  return normalizeReplay(await response.json(), id);
 }

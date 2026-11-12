@@ -149,12 +149,6 @@
   color: var(--text-tertiary);
 }
 
-.badge.demo {
-  background: rgba(251, 191, 36, 0.09);
-  border-color: rgba(251, 191, 36, 0.24);
-  color: var(--amber);
-}
-
 .badge.soft {
   letter-spacing: 0.04em;
   text-transform: none;

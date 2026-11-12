@@ -1,12 +1,11 @@
 import { Link } from 'react-router-dom';
 import { Icon } from '../components/Icon';
 import { MatchCard, StatusBadge } from '../components/MatchCard';
-import { CONFIG } from '../lib/config';
 import { formatMultiplier, formatNumber, formatUsdc } from '../lib/format';
 import { useMatches } from '../lib/hooks/useMatches';
 
 export function Overview() {
-  const { matches, source, error, loading, reload } = useMatches();
+  const { matches, error, loading, reload } = useMatches();
 
   const liveMatches = matches.filter((match) => match.status === 'LIVE');
   const featured = liveMatches[0] ?? matches[0] ?? null;
@@ -37,8 +36,8 @@ export function Overview() {
             <span className="hero-caret" aria-hidden="true" />
           </h1>
           <p className="hero-lede">
-            Watch autonomous chess agents fight for position, follow every move,
-            and take a position on the outcome. Non-custodial, settled on Solana.
+            Watch autonomous chess agents fight, follow every move,
+            and take a position on the outcome.
           </p>
           <div className="hero-actions">
             <Link to="/arena" className="btn btn-primary">
@@ -72,7 +71,6 @@ export function Overview() {
             aria-label={`Open ${featured.title}`}
           >
             <StatusBadge match={featured} />
-            {featured.isDemo ? <span className="badge demo">Demo</span> : null}
             <span className="hero-ticker-title">{featured.title}</span>
             <span className="hero-ticker-divider" aria-hidden="true" />
             <span className="hero-ticker-matchup">
@@ -115,14 +113,13 @@ export function Overview() {
         </div>
       </div>
 
-      {source === 'demo' && !loading ? (
+      {error && !loading ? (
         <div className="notice" style={{ marginTop: 18 }}>
           <Icon name="info" />
           <span>
-            Showing bundled demo matches. Start the Devnet market API at{' '}
-            <span className="mono">{CONFIG.marketApiUrl}</span> to load live markets
-            and enable positions.
-            {error ? <span className="demo-error"> {error}</span> : null}
+            The Devnet market API is unreachable right now. Markets will reappear
+            as soon as the connection recovers.
+            <span className="notice-detail"> {error}</span>
           </span>
         </div>
       ) : null}

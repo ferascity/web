@@ -21,7 +21,11 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { requestPositionTransaction } from './api/positions';
+import {
+  requestPositionTransaction,
+  requestSettlementTransaction,
+  type SettlementKind,
+} from './api/positions';
 import {
   buildSwapMessage,
   prepareBetaSwap,
@@ -31,7 +35,7 @@ import {
 } from './api/beta';
 import { CONFIG, EXPLORER_URL } from './config';
 import { shortAddress } from './format';
-import type { PositionDraft, TransactionReceipt } from './types';
+import type { MarketPosition, PositionDraft, TransactionReceipt } from './types';
 
 type BalanceStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -51,6 +55,10 @@ interface WalletContextValue {
   logout: () => Promise<void>;
   createWallet: () => Promise<void>;
   placePosition: (draft: PositionDraft) => Promise<TransactionReceipt>;
+  settlePosition: (
+    position: MarketPosition,
+    kind: SettlementKind,
+  ) => Promise<TransactionReceipt>;
   requestDevnetSol: () => Promise<string>;
   signMessage: (message: string) => Promise<string>;
   topUpTestCredit: (usdc: number) => Promise<BetaSwapResult>;
@@ -253,6 +261,79 @@ export function WalletProvider({ children }: WalletProviderProps) {
     [address, solanaWallet, connection, signTransaction],
   );
 
+  const settlePosition = useCallback(
+    async (
+      position: MarketPosition,
+      kind: SettlementKind,
+    ): Promise<TransactionReceipt> => {
+      if (!address || !solanaWallet) {
+        throw new Error('Connect a Solana wallet to settle a position.');
+      }
+
+      try {
+        const { instructions } = await requestSettlementTransaction(
+          position.id,
+          address,
+          kind,
+        );
+
+        const transaction = new Transaction();
+        transaction.add(...instructions);
+        transaction.feePayer = new PublicKey(address);
+
+        const latest = await connection.getLatestBlockhash('confirmed');
+        transaction.recentBlockhash = latest.blockhash;
+
+        const serialized = transaction.serialize({
+          requireAllSignatures: false,
+          verifySignatures: false,
+        });
+
+        const { signedTransaction } = await signTransaction({
+          transaction: new Uint8Array(serialized),
+          wallet: solanaWallet,
+          chain: 'solana:devnet',
+        });
+
+        const signature = await connection.sendRawTransaction(signedTransaction, {
+          skipPreflight: false,
+          preflightCommitment: 'confirmed',
+          maxRetries: 3,
+        });
+
+        const confirmation = await connection.confirmTransaction(
+          {
+            signature,
+            blockhash: latest.blockhash,
+            lastValidBlockHeight: latest.lastValidBlockHeight,
+          },
+          'confirmed',
+        );
+
+        if (confirmation.value.err) {
+          throw new Error(
+            `The ${kind} transaction failed on-chain. Nothing was moved.`,
+          );
+        }
+
+        setBalanceNonce((value) => value + 1);
+
+        return {
+          signature,
+          explorerUrl: `${EXPLORER_URL}/tx/${signature}?cluster=devnet`,
+          cluster: 'devnet',
+        };
+      } catch (error) {
+        const message = describeError(error, `The ${kind} could not be completed.`);
+        if (/reject|cancel|denied/i.test(message)) {
+          throw new Error('Signature request cancelled.');
+        }
+        throw new Error(message);
+      }
+    },
+    [address, solanaWallet, connection, signTransaction],
+  );
+
   const requestDevnetSol = useCallback(async (): Promise<string> => {
     if (!address) throw new Error('No Solana wallet is connected.');
     try {
@@ -398,6 +479,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
     logout,
     createWallet,
     placePosition,
+    settlePosition,
     requestDevnetSol,
     signMessage,
     topUpTestCredit,

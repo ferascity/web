@@ -8,7 +8,7 @@ interface MatchesState extends MatchesResult {
 
 const initialState: MatchesState = {
   matches: [],
-  source: 'demo',
+  source: 'live',
   error: null,
   loading: true,
 };
@@ -29,7 +29,7 @@ export function useMatches(status?: MatchStatus) {
         if (cancelled) return;
         setState({
           matches: [],
-          source: 'demo',
+          source: 'live',
           error:
             error instanceof Error
               ? error.message
