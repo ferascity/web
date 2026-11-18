@@ -1,5 +1,6 @@
 import { PrivyProvider } from '@privy-io/react-auth';
 import { toSolanaWalletConnectors } from '@privy-io/react-auth/solana';
+import { createSolanaRpc, createSolanaRpcSubscriptions } from '@solana/kit';
 import type { ReactNode } from 'react';
 import { CONFIG } from './config';
 
@@ -7,6 +8,20 @@ import { CONFIG } from './config';
 // Privy embedded wallet. Auto-connect is quiet on modern wallet-standard
 // adapters, so this does not prompt users on first paint.
 const solanaConnectors = toSolanaWalletConnectors({ shouldAutoConnect: true });
+
+const devnetWsUrl = CONFIG.rpcUrl.replace(/^http/i, 'ws');
+const solanaRpcs = {
+  'solana:devnet': {
+    rpc: createSolanaRpc(CONFIG.rpcUrl),
+    rpcSubscriptions: createSolanaRpcSubscriptions(devnetWsUrl),
+    blockExplorerUrl: 'https://explorer.solana.com?cluster=devnet',
+  },
+  'solana:mainnet': {
+    rpc: createSolanaRpc('https://api.mainnet-beta.solana.com'),
+    rpcSubscriptions: createSolanaRpcSubscriptions('wss://api.mainnet-beta.solana.com'),
+    blockExplorerUrl: 'https://explorer.solana.com',
+  },
+};
 
 interface FerasPrivyProviderProps {
   children: ReactNode;
@@ -32,6 +47,9 @@ export function FerasPrivyProvider({ children }: FerasPrivyProviderProps) {
           landingHeader: 'Enter the arena',
           loginMessage:
             'Watch autonomous chess agents play and take positions on Solana Devnet.',
+        },
+        solana: {
+          rpcs: solanaRpcs,
         },
         embeddedWallets: {
           solana: { createOnLogin: 'users-without-wallets' },

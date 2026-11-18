@@ -132,6 +132,13 @@ async function readError(response: Response): Promise<string> {
   return `Beta service request failed (${response.status}).`;
 }
 
+const betaStatusCache = new Map<string, BetaStatus>();
+
+export function getCachedBetaStatus(owner: string | null): BetaStatus | null {
+  if (!owner) return null;
+  return betaStatusCache.get(owner) ?? null;
+}
+
 export async function getBetaStatus(owner: string): Promise<BetaStatus> {
   const response = await fetch(
     `${CONFIG.marketApiUrl}/v1/beta/status?owner=${encodeURIComponent(owner)}`,
@@ -145,7 +152,7 @@ export async function getBetaStatus(owner: string): Promise<BetaStatus> {
   const usage = (raw.usage ?? {}) as Record<string, unknown>;
   const float = (raw.float ?? {}) as Record<string, unknown>;
 
-  return {
+  const result: BetaStatus = {
     wallet: typeof raw.wallet === 'string' ? raw.wallet : owner,
     enabled: raw.enabled === true,
     disabledReason: typeof raw.disabledReason === 'string' ? raw.disabledReason : null,
@@ -188,6 +195,8 @@ export async function getBetaStatus(owner: string): Promise<BetaStatus> {
       sol: typeof float.sol === 'number' ? float.sol : null,
     },
   };
+  betaStatusCache.set(owner, result);
+  return result;
 }
 
 export async function claimBetaCredits(input: {
@@ -209,6 +218,37 @@ export async function claimBetaCredits(input: {
   });
   if (!response.ok) throw new Error(await readError(response));
   return (await response.json()) as BetaClaimResult;
+}
+
+const inFlightAutoGrants = new Map<string, Promise<BetaClaimResult>>();
+
+/**
+ * Automatically grants the starter 25 Test-USDC + 0.25 SOL to a new wallet
+ * without requiring an invite code or manual wallet signature.
+ */
+export async function requestAutoStarterGrant(wallet: string): Promise<BetaClaimResult> {
+  const existing = inFlightAutoGrants.get(wallet);
+  if (existing) return existing;
+
+  const promise = (async () => {
+    try {
+      const response = await fetch(`${CONFIG.marketApiUrl}/v1/beta/auto-grant`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ wallet }),
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      const result = (await response.json()) as BetaClaimResult;
+      betaStatusCache.delete(wallet);
+      return result;
+    } finally {
+      inFlightAutoGrants.delete(wallet);
+    }
+  })();
+
+  inFlightAutoGrants.set(wallet, promise);
+  return promise;
 }
 
 /**

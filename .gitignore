@@ -6,3 +6,9 @@ dist
 !.env.example
 *.local
 .DS_Store
+.vercel
+package-lock.json
+
+# Launch video (Remotion) workspace
+.launch-video/
+launch-video.mp4

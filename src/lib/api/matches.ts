@@ -1,15 +1,148 @@
+import { Connection, PublicKey } from '@solana/web3.js';
 import { CONFIG } from '../config';
 import type {
   Agent,
   GameReplay,
+  MarketOutcome,
   Match,
   MatchCategory,
   MatchStatus,
   MoveStep,
+  OnChainMarketStatus,
 } from '../types';
 
 const INITIAL_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 const REQUEST_TIMEOUT_MS = 9000;
+const FEE_BPS = 200; // 2% protocol fee on settled parimutuel pools
+
+let sharedConnection: Connection | null = null;
+function getConnection(): Connection {
+  if (!sharedConnection) {
+    sharedConnection = new Connection(CONFIG.rpcUrl, 'confirmed');
+  }
+  return sharedConnection;
+}
+
+function readU64LE(bytes: Uint8Array, offset: number): number {
+  let value = 0n;
+  for (let i = 0; i < 8; i += 1) {
+    value |= BigInt(bytes[offset + i]) << BigInt(i * 8);
+  }
+  return Number(value);
+}
+
+function decodeOnChainMarket(data: Uint8Array): {
+  marketStatus: OnChainMarketStatus;
+  result: MarketOutcome | null;
+  poolVolumeUsdc: number;
+  whiteMultiplier: number;
+  drawMultiplier: number;
+  blackMultiplier: number;
+} | null {
+  if (data.length < 179) return null;
+  const statusByte = data[144];
+  const marketStatus: OnChainMarketStatus =
+    statusByte === 0
+      ? 'OPEN'
+      : statusByte === 1
+        ? 'LOCKED'
+        : statusByte === 2
+          ? 'SETTLED'
+          : statusByte === 3
+            ? 'CANCELLED'
+            : statusByte === 4
+              ? 'CLOSED'
+              : 'UNKNOWN';
+  const hasResult = data[145] === 1;
+  const resultByte = hasResult ? data[146] : null;
+  const result: MarketOutcome | null =
+    resultByte === 0
+      ? 'WHITE'
+      : resultByte === 1
+        ? 'DRAW'
+        : resultByte === 2
+          ? 'BLACK'
+          : null;
+  // Option<MarketOutcome> is 1 byte when None (0x00) and 2 bytes when Some (0x01, u8).
+  const base = hasResult ? 147 : 146;
+  const whitePool = readU64LE(data, base) / 1_000_000;
+  const drawPool = readU64LE(data, base + 8) / 1_000_000;
+  const blackPool = readU64LE(data, base + 16) / 1_000_000;
+  const totalPool = readU64LE(data, base + 24) / 1_000_000;
+  const netPool = totalPool * (1 - FEE_BPS / 10_000);
+  const multiplierFor = (side: number) =>
+    side > 0 && netPool > 0 ? Number((netPool / side).toFixed(2)) : 0;
+
+  return {
+    marketStatus,
+    result,
+    poolVolumeUsdc: Number(totalPool.toFixed(2)),
+    whiteMultiplier: multiplierFor(whitePool),
+    drawMultiplier: multiplierFor(drawPool),
+    blackMultiplier: multiplierFor(blackPool),
+  };
+}
+
+type DecodedMarket = NonNullable<ReturnType<typeof decodeOnChainMarket>>;
+const marketAccountCache = new Map<string, { decoded: DecodedMarket; fetchedAt: number }>();
+const MARKET_CACHE_TTL_MS = 4_000;
+
+async function enrichMatchesOnChain(matches: Match[]): Promise<Match[]> {
+  const withAddress = matches.filter(
+    (m): m is Match & { marketAddress: string } => Boolean(m.marketAddress),
+  );
+  if (withAddress.length === 0) return matches;
+
+  const now = Date.now();
+  const stale = withAddress.filter((m) => {
+    const cached = marketAccountCache.get(m.marketAddress);
+    return !cached || now - cached.fetchedAt > MARKET_CACHE_TTL_MS;
+  });
+
+  if (stale.length > 0) {
+    try {
+      const pubkeys = stale.map((m) => new PublicKey(m.marketAddress));
+      const infos = await Promise.race([
+        getConnection().getMultipleAccountsInfo(pubkeys),
+        new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 2_200)),
+      ]);
+      if (infos) {
+        stale.forEach((m, idx) => {
+          const info = infos[idx];
+          if (info?.data) {
+            const decoded = decodeOnChainMarket(info.data);
+            if (decoded) {
+              marketAccountCache.set(m.marketAddress, {
+                decoded,
+                fetchedAt: Date.now(),
+              });
+            }
+          }
+        });
+      }
+    } catch {
+      // Fall back to any cached or API-provided values.
+    }
+  }
+
+  return matches.map((match) => {
+    if (!match.marketAddress) return match;
+    const cached = marketAccountCache.get(match.marketAddress)?.decoded;
+    if (!cached) return match;
+    return {
+      ...match,
+      marketStatus: cached.marketStatus,
+      result: match.result ?? cached.result,
+      poolVolumeUsdc: cached.poolVolumeUsdc,
+      marketEstimates: {
+        ...match.marketEstimates,
+        whiteMultiplier: cached.whiteMultiplier,
+        drawMultiplier: cached.drawMultiplier,
+        blackMultiplier: cached.blackMultiplier,
+      },
+    };
+  });
+}
 
 export interface MatchesResult {
   matches: Match[];
@@ -162,6 +295,17 @@ function normalizeCategory(value: unknown): MatchCategory {
     : 'BENCHMARK';
 }
 
+function normalizeMarketStatus(value: unknown): OnChainMarketStatus | undefined {
+  return value === 'OPEN' ||
+    value === 'LOCKED' ||
+    value === 'SETTLED' ||
+    value === 'CANCELLED' ||
+    value === 'CLOSED' ||
+    value === 'UNKNOWN'
+    ? value
+    : undefined;
+}
+
 export function normalizeMatch(value: unknown): Match {
   const raw = isRecord(value) ? value : {};
   const id = stringValue(raw.id, 'unknown-market');
@@ -212,6 +356,7 @@ export function normalizeMatch(value: unknown): Match {
     vaultAddress: typeof raw.vaultAddress === 'string' ? raw.vaultAddress : undefined,
     marketLockTime:
       typeof raw.marketLockTime === 'string' ? raw.marketLockTime : null,
+    marketStatus: normalizeMarketStatus(raw.marketStatus),
   };
 }
 
@@ -241,15 +386,54 @@ export function sortMatches(matches: Match[]): Match[] {
   });
 }
 
+const matchesListCache = new Map<string, MatchesResult>();
+function cacheKeyForMatches(status?: MatchStatus, limit?: number): string {
+  return `${status ?? 'ALL'}:${limit ?? 0}`;
+}
+
+export function getCachedMatches(
+  status?: MatchStatus,
+  limit?: number,
+): MatchesResult | null {
+  const exact = matchesListCache.get(cacheKeyForMatches(status, limit));
+  if (exact) return exact;
+  // If a larger unrestricted list was already loaded (e.g., on Arena), reuse a
+  // slice of it immediately so Overview renders without a loading flash.
+  if (!status && limit && limit > 0) {
+    for (const [key, entry] of matchesListCache.entries()) {
+      if (key.startsWith('ALL:') && entry.matches.length >= limit) {
+        return {
+          ...entry,
+          matches: entry.matches.slice(0, limit),
+        };
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * The list endpoint intentionally ships no move payloads: one analyzed match
  * can be hundreds of kilobytes, and the arena only needs the selected one.
  */
-export async function loadMatches(status?: MatchStatus): Promise<MatchesResult> {
-  const query = status ? `?status=${status}` : '';
+export async function loadMatches(
+  status?: MatchStatus,
+  { limit }: { limit?: number } = {},
+): Promise<MatchesResult> {
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  if (limit && limit > 0) params.set('limit', String(Math.trunc(limit)));
+  const query = params.size > 0 ? `?${params.toString()}` : '';
   try {
-    const matches = await request(`/v1/matches${query}`);
-    return { matches: sortMatches(matches), source: 'live', error: null };
+    const rawMatches = await request(`/v1/matches${query}`);
+    const matches = await enrichMatchesOnChain(rawMatches);
+    const result: MatchesResult = {
+      matches: sortMatches(matches),
+      source: 'live',
+      error: null,
+    };
+    matchesListCache.set(cacheKeyForMatches(status, limit), result);
+    return result;
   } catch (error) {
     return {
       matches: [],
@@ -269,7 +453,9 @@ export async function loadMatch(id: string): Promise<Match | null> {
   });
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`Market API responded with ${response.status}`);
-  return normalizeMatch(await response.json());
+  const match = normalizeMatch(await response.json());
+  const [enriched] = await enrichMatchesOnChain([match]);
+  return enriched;
 }
 
 export async function loadMatchReplay(id: string): Promise<GameReplay> {
@@ -282,4 +468,137 @@ export async function loadMatchReplay(id: string): Promise<GameReplay> {
   );
   if (!response.ok) throw new Error(`Replay request failed (${response.status})`);
   return normalizeReplay(await response.json(), id);
+}
+
+function pieceFromSan(san: string): 'p' | 'n' | 'b' | 'r' | 'q' | 'k' {
+  const trimmed = san.trim();
+  if (trimmed.startsWith('O-O')) return 'k';
+  const lead = trimmed[0];
+  if (lead === 'N') return 'n';
+  if (lead === 'B') return 'b';
+  if (lead === 'R') return 'r';
+  if (lead === 'Q') return 'q';
+  if (lead === 'K') return 'k';
+  return 'p';
+}
+
+export interface StreamMoveUpdate {
+  step: MoveStep;
+  sequence: number;
+}
+
+export interface StreamCompletedUpdate {
+  result: MarketOutcome | null;
+  rawResult: '1-0' | '0-1' | '1/2-1/2' | '*';
+  reason: string;
+  sequence: number;
+}
+
+/**
+ * Subscribe to the backend's Server-Sent Events stream for a live/upcoming
+ * match (`/v1/matches/:id/events/stream`). Returns a cleanup function.
+ */
+export function subscribeMatchEvents(
+  matchId: string,
+  {
+    after = 0,
+    onMove,
+    onCompleted,
+    onError,
+  }: {
+    after?: number;
+    onMove?: (update: StreamMoveUpdate) => void;
+    onCompleted?: (update: StreamCompletedUpdate) => void;
+    onError?: () => void;
+  },
+): () => void {
+  if (typeof EventSource === 'undefined') return () => {};
+  const safeAfter = Math.max(0, Math.trunc(after));
+  const url = `${CONFIG.marketApiUrl}/v1/matches/${encodeURIComponent(matchId)}/events/stream?after=${safeAfter}`;
+  const source = new EventSource(url);
+
+  source.addEventListener('MOVE', (rawEvent) => {
+    try {
+      const envelope = JSON.parse((rawEvent as MessageEvent).data) as unknown;
+      if (!isRecord(envelope)) return;
+      const sequence = numberValue(envelope.sequence, 0);
+      const payload = isRecord(envelope.payload) ? envelope.payload : envelope;
+      const ply = numberValue(payload.ply, 0);
+      const uci = stringValue(payload.uci, '');
+      const from = asSquare(uci.slice(0, 2));
+      const to = asSquare(uci.slice(2, 4));
+      if (!ply || !from || !to) return;
+
+      const san = stringValue(payload.san, `${from}-${to}`);
+      const fen = stringValue(payload.fen, INITIAL_FEN);
+      const color: 'w' | 'b' = ply % 2 === 1 ? 'w' : 'b';
+      const analysis = Array.isArray(payload.analysis) ? payload.analysis : [];
+      const firstLine = isRecord(analysis[0]) ? analysis[0] : null;
+      const evalCentipawns =
+        firstLine && typeof firstLine.scoreCp === 'number'
+          ? firstLine.scoreCp
+          : undefined;
+      const evalPawns = evalCentipawns != null ? evalCentipawns / 100 : 0;
+      const winProbabilityWhite = 1 / (1 + Math.pow(10, -evalPawns / 4));
+
+      onMove?.({
+        sequence,
+        step: {
+          ply,
+          from,
+          to,
+          piece: pieceFromSan(san),
+          color,
+          san,
+          fen,
+          evalCentipawns,
+          timeSpentSec: numberValue(payload.timeSpentMs, 0) / 1000,
+          isCheck: san.includes('+') || san.includes('#'),
+          isCheckmate: san.includes('#'),
+          winProbabilityWhite,
+        },
+      });
+    } catch {
+      // Ignore malformed SSE frames.
+    }
+  });
+
+  source.addEventListener('GAME_COMPLETED', (rawEvent) => {
+    try {
+      const envelope = JSON.parse((rawEvent as MessageEvent).data) as unknown;
+      if (!isRecord(envelope)) return;
+      const sequence = numberValue(envelope.sequence, 0);
+      const payload = isRecord(envelope.payload) ? envelope.payload : envelope;
+      const rawResult =
+        payload.result === '1-0' ||
+        payload.result === '0-1' ||
+        payload.result === '1/2-1/2'
+          ? payload.result
+          : '*';
+      const result: MarketOutcome | null =
+        rawResult === '1-0'
+          ? 'WHITE'
+          : rawResult === '0-1'
+            ? 'BLACK'
+            : rawResult === '1/2-1/2'
+              ? 'DRAW'
+              : null;
+      onCompleted?.({
+        sequence,
+        rawResult,
+        result,
+        reason: stringValue(payload.reason, 'Completed'),
+      });
+    } catch {
+      // Ignore malformed SSE frames.
+    }
+  });
+
+  source.onerror = () => {
+    onError?.();
+  };
+
+  return () => {
+    source.close();
+  };
 }

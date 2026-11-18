@@ -34,21 +34,20 @@ export function WalletMenu() {
     setCopied(false);
   }, [address]);
 
+  if (!ready) {
+    return <span className="wallet-btn ghost-placeholder skeleton" aria-hidden="true" />;
+  }
+
   if (!authenticated) {
     return (
       <button
         type="button"
         className="wallet-btn connect"
         onClick={login}
-        disabled={!ready}
       >
         Sign in
       </button>
     );
-  }
-
-  if (!ready) {
-    return <span className="wallet-btn ghost-placeholder skeleton" aria-hidden="true" />;
   }
 
   const copyAddress = async () => {

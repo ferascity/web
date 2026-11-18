@@ -29,6 +29,7 @@ import {
 import {
   buildSwapMessage,
   prepareBetaSwap,
+  requestAutoStarterGrant,
   submitBetaSwap,
   toUsdcBaseUnits,
   type BetaSwapResult,
@@ -43,12 +44,14 @@ interface WalletContextValue {
   ready: boolean;
   authDelayed: boolean;
   authenticated: boolean;
+  walletLoading: boolean;
   address: string | null;
   walletName: string | null;
   userLabel: string | null;
   solBalance: number;
   usdcBalance: number;
   balanceStatus: BalanceStatus;
+  balanceRefreshing: boolean;
   balanceError: string | null;
   refreshBalances: () => void;
   login: () => void;
@@ -65,6 +68,8 @@ interface WalletContextValue {
 }
 
 const WalletContext = createContext<WalletContextValue | null>(null);
+const balanceCache = new Map<string, { sol: number; usdc: number }>();
+const autoGrantedWallets = new Set<string>();
 
 function describeError(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message) return error.message;
@@ -97,7 +102,7 @@ interface WalletProviderProps {
 
 export function WalletProvider({ children }: WalletProviderProps) {
   const { ready: privyReady, authenticated, user, login, logout } = usePrivy();
-  const { wallets } = useWallets();
+  const { wallets, ready: walletsReady } = useWallets();
   const { signTransaction } = useSignTransaction();
   const { signMessage: privySignMessage } = useSignMessage();
   const { createWallet: createSolanaWallet } = useCreateWallet();
@@ -113,8 +118,43 @@ export function WalletProvider({ children }: WalletProviderProps) {
     wallets.find((wallet) => /privy/i.test(wallet.standardWallet.name)) ??
     wallets[0] ??
     null;
-  const address = solanaWallet?.address ?? null;
-  const walletName = solanaWallet?.standardWallet?.name ?? null;
+
+  // Read linked Solana wallet address from the Privy user profile immediately
+  // so balances & positions start loading on the first authenticated frame
+  // without waiting for the embedded wallet iframe to finish hydrating.
+  const linkedSolanaAddress = useMemo(() => {
+    const accounts = user?.linkedAccounts ?? [];
+    for (const account of accounts) {
+      if (
+        account.type === 'wallet' &&
+        'chainType' in account &&
+        account.chainType === 'solana' &&
+        'address' in account &&
+        typeof account.address === 'string'
+      ) {
+        return account.address;
+      }
+    }
+    return null;
+  }, [user]);
+
+  const address = solanaWallet?.address ?? linkedSolanaAddress ?? null;
+  const walletName =
+    solanaWallet?.standardWallet?.name ?? (linkedSolanaAddress ? 'Privy' : null);
+
+  const [walletGrace, setWalletGrace] = useState(false);
+  useEffect(() => {
+    if (!authenticated || address) {
+      setWalletGrace(false);
+      return;
+    }
+    setWalletGrace(true);
+    const timer = window.setTimeout(() => setWalletGrace(false), 2_200);
+    return () => window.clearTimeout(timer);
+  }, [authenticated, address]);
+
+  const walletLoading =
+    authenticated && !address && (!walletsReady || walletGrace);
 
   // Privy initializes through an iframe. If the current origin is not in the
   // app's allowed origins, initialization can wait forever; after a generous
@@ -133,6 +173,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
   const [solBalance, setSolBalance] = useState(0);
   const [usdcBalance, setUsdcBalance] = useState(0);
   const [balanceStatus, setBalanceStatus] = useState<BalanceStatus>('idle');
+  const [balanceRefreshing, setBalanceRefreshing] = useState(false);
   const [balanceError, setBalanceError] = useState<string | null>(null);
   const [balanceNonce, setBalanceNonce] = useState(0);
 
@@ -141,14 +182,22 @@ export function WalletProvider({ children }: WalletProviderProps) {
       setSolBalance(0);
       setUsdcBalance(0);
       setBalanceStatus('idle');
+      setBalanceRefreshing(false);
       setBalanceError(null);
       return;
     }
 
     let cancelled = false;
     const owner = new PublicKey(address);
-
-    setBalanceStatus('loading');
+    const cached = balanceCache.get(address);
+    if (cached) {
+      setSolBalance(cached.sol);
+      setUsdcBalance(cached.usdc);
+      setBalanceStatus('ready');
+      setBalanceRefreshing(true);
+    } else {
+      setBalanceStatus('loading');
+    }
     setBalanceError(null);
 
     const load = async () => {
@@ -168,12 +217,19 @@ export function WalletProvider({ children }: WalletProviderProps) {
           if (typeof amount === 'number') usdc += amount;
         }
 
-        setSolBalance(lamports / LAMPORTS_PER_SOL);
-        setUsdcBalance(Number(usdc.toFixed(2)));
+        const nextSol = lamports / LAMPORTS_PER_SOL;
+        const nextUsdc = Number(usdc.toFixed(2));
+        balanceCache.set(address, { sol: nextSol, usdc: nextUsdc });
+        setSolBalance(nextSol);
+        setUsdcBalance(nextUsdc);
         setBalanceStatus('ready');
+        setBalanceRefreshing(false);
       } catch (error) {
         if (cancelled) return;
-        setBalanceStatus('error');
+        setBalanceRefreshing(false);
+        if (!balanceCache.has(address)) {
+          setBalanceStatus('error');
+        }
         setBalanceError(
           describeError(error, 'Balances are unavailable right now.'),
         );
@@ -189,6 +245,30 @@ export function WalletProvider({ children }: WalletProviderProps) {
   const refreshBalances = useCallback(() => {
     setBalanceNonce((value) => value + 1);
   }, []);
+
+  // Automatically fund new wallets with 25 Test-USDC + 0.25 SOL on sign-in
+  // without requiring an invite code or manual claim signature.
+  useEffect(() => {
+    if (!authenticated || !address) return;
+    if (autoGrantedWallets.has(address)) return;
+    autoGrantedWallets.add(address);
+
+    let cancelled = false;
+    void requestAutoStarterGrant(address)
+      .then((result) => {
+        if (!cancelled && result.status === 'CLAIMED') {
+          setBalanceNonce((value) => value + 1);
+        }
+      })
+      .catch(() => {
+        // Allow retry if the float or network was temporarily unavailable.
+        autoGrantedWallets.delete(address);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticated, address]);
 
   const createWallet = useCallback(async () => {
     await createSolanaWallet();
@@ -467,12 +547,14 @@ export function WalletProvider({ children }: WalletProviderProps) {
     ready: privyReady || fallbackReady,
     authDelayed: fallbackReady,
     authenticated,
+    walletLoading,
     address,
     walletName,
     userLabel,
     solBalance,
     usdcBalance,
     balanceStatus,
+    balanceRefreshing,
     balanceError,
     refreshBalances,
     login,

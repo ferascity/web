@@ -1,5 +1,13 @@
 export type MatchStatus = 'LIVE' | 'UPCOMING' | 'COMPLETED';
 
+export type OnChainMarketStatus =
+  | 'OPEN'
+  | 'LOCKED'
+  | 'SETTLED'
+  | 'CANCELLED'
+  | 'CLOSED'
+  | 'UNKNOWN';
+
 export type MatchCategory =
   | 'CHAMPIONSHIP'
   | 'GRAND_PRIX'
@@ -92,6 +100,7 @@ export interface Match {
   marketAddress?: string;
   vaultAddress?: string;
   marketLockTime?: string | null;
+  marketStatus?: OnChainMarketStatus;
 }
 
 export type PositionStatus =

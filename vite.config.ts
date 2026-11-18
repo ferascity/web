@@ -19,6 +19,7 @@ export default defineConfig({
       'buffer',
       '@privy-io/react-auth',
       '@privy-io/react-auth/solana',
+      '@solana/kit',
       '@solana/web3.js',
     ],
   },

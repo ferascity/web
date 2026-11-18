@@ -1,31 +1,35 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Icon } from './Icon';
 import {
-  buildClaimMessage,
-  claimBetaCredits,
   getBetaStatus,
-  normalizeInviteCode,
+  getCachedBetaStatus,
+  requestAutoStarterGrant,
   type BetaStatus,
 } from '../lib/api/beta';
-import { clearInviteCode, readInviteCode, saveInviteCode } from '../lib/betaInvite';
-import { shortAddress } from '../lib/format';
 import { useWallet } from '../lib/wallet';
 
 type LoadState = 'idle' | 'loading' | 'ready' | 'error';
-type ClaimState = 'idle' | 'signing' | 'sending' | 'done';
+type ClaimState = 'idle' | 'sending' | 'done';
 type TopUpState = 'idle' | 'signing' | 'sending' | 'done';
 
 export function BetaCreditsCard() {
-  const { address, authenticated, usdcBalance, refreshBalances, signMessage, topUpTestCredit } =
-    useWallet();
+  const {
+    address,
+    authenticated,
+    walletLoading,
+    refreshBalances,
+    topUpTestCredit,
+  } = useWallet();
 
-  const [status, setStatus] = useState<BetaStatus | null>(null);
-  const [loadState, setLoadState] = useState<LoadState>('idle');
+  const [status, setStatus] = useState<BetaStatus | null>(() =>
+    getCachedBetaStatus(address),
+  );
+  const [loadState, setLoadState] = useState<LoadState>(() =>
+    getCachedBetaStatus(address) ? 'ready' : address ? 'loading' : 'idle',
+  );
   const [error, setError] = useState<string | null>(null);
-  const [code, setCode] = useState(() => readInviteCode() ?? '');
   const [claimState, setClaimState] = useState<ClaimState>('idle');
   const [claimError, setClaimError] = useState<string | null>(null);
-  const [claimedSignature, setClaimedSignature] = useState<string | null>(null);
   const [topUpAmount, setTopUpAmount] = useState(10);
   const [topUpState, setTopUpState] = useState<TopUpState>('idle');
   const [topUpError, setTopUpError] = useState<string | null>(null);
@@ -33,15 +37,45 @@ export function BetaCreditsCard() {
 
   const load = useCallback(
     async (wallet: string) => {
-      setLoadState('loading');
+      const cached = getCachedBetaStatus(wallet);
+      if (cached) {
+        setStatus(cached);
+        setLoadState('ready');
+      } else {
+        setLoadState('loading');
+      }
       setError(null);
       try {
-        const next = await getBetaStatus(wallet);
+        let next = await getBetaStatus(wallet);
         setStatus(next);
         setLoadState('ready');
-        setCode((current) => current || next.tester?.inviteCode || '');
+
+        // Automatically fund new wallets with starter credits without requiring
+        // an invite code or manual signature.
+        if (next.enabled && !next.grant && !next.tester?.blocked && !next.tester?.claimedAt) {
+          setClaimState('sending');
+          setClaimError(null);
+          try {
+            const grantRes = await requestAutoStarterGrant(wallet);
+            if (grantRes.status === 'CLAIMED') {
+              refreshBalances();
+            }
+            next = await getBetaStatus(wallet);
+            setStatus(next);
+            setClaimState('done');
+          } catch (autoErr) {
+            setClaimState('idle');
+            setClaimError(
+              autoErr instanceof Error
+                ? autoErr.message
+                : 'Starter credits could not be sent right now.',
+            );
+          }
+        }
       } catch (loadError) {
-        setLoadState('error');
+        if (!getCachedBetaStatus(wallet)) {
+          setLoadState('error');
+        }
         setError(
           loadError instanceof Error
             ? loadError.message
@@ -49,7 +83,7 @@ export function BetaCreditsCard() {
         );
       }
     },
-    [],
+    [refreshBalances],
   );
 
   useEffect(() => {
@@ -61,60 +95,42 @@ export function BetaCreditsCard() {
     void load(address);
   }, [authenticated, address, load]);
 
-  const handleClaim = async () => {
-    if (!address || claimState === 'signing' || claimState === 'sending') return;
-    const inviteCode = normalizeInviteCode(code);
-    if (!inviteCode) {
-      setClaimError('Enter your invite code to claim beta credits.');
-      return;
-    }
-
+  const handleManualGrantRetry = async () => {
+    if (!address || claimState === 'sending') return;
     setClaimError(null);
-    setClaimState('signing');
+    setClaimState('sending');
     try {
-      const issuedAt = Date.now();
-      const message = buildClaimMessage({ wallet: address, code: inviteCode, issuedAt });
-      const signature = await signMessage(message);
-      saveInviteCode(inviteCode);
-
-      setClaimState('sending');
-      const result = await claimBetaCredits({
-        code: inviteCode,
-        wallet: address,
-        issuedAt,
-        signature,
-      });
-
-      setClaimedSignature(result.signature ?? null);
-      clearInviteCode();
+      await requestAutoStarterGrant(address);
       setClaimState('done');
       refreshBalances();
-      await load(address);
+      const next = await getBetaStatus(address);
+      setStatus(next);
     } catch (claimFailure) {
       setClaimState('idle');
-      const message =
+      setClaimError(
         claimFailure instanceof Error
           ? claimFailure.message
-          : 'The claim could not be completed.';
-      setClaimError(
-        /reject|cancel|denied/i.test(message) ? 'Signature request cancelled.' : message,
+          : 'Starter credits could not be sent right now.',
       );
     }
   };
 
   if (!authenticated) return null;
+  if (walletLoading || (loadState === 'loading' && !status)) {
+    return (
+      <div className="profile-strip" aria-hidden="true">
+        <span className="skeleton" style={{ height: 16, width: 160 }} />
+        <span className="skeleton" style={{ height: 30, width: 220, borderRadius: 999 }} />
+      </div>
+    );
+  }
+  if (!address) return null;
 
   const grant = status?.grant ?? null;
   const confirmed = grant?.status === 'CONFIRMED';
-  const pending = grant?.status === 'PENDING';
+  const pending = grant?.status === 'PENDING' || claimState === 'sending';
   const blocked = status?.tester?.blocked === true;
   const disabled = status ? !status.enabled : false;
-  const busy = claimState === 'signing' || claimState === 'sending';
-  const explorerUrl =
-    grant?.explorerUrl ??
-    (claimedSignature
-      ? `https://explorer.solana.com/tx/${claimedSignature}?cluster=devnet`
-      : null);
 
   const rate = status?.limits.solToUsdcRate ?? 150;
   const minTopUp = status?.limits.swapMinUsdc ?? 5;
@@ -152,220 +168,120 @@ export function BetaCreditsCard() {
     }
   };
 
-  let body;
-  if (!address) {
-    body = (
-      <p className="beta-copy">
-        Create your Solana wallet above, then claim your private beta credits.
-      </p>
-    );
-  } else if (loadState === 'loading' && !status) {
-    body = (
-      <div className="beta-skeleton" aria-hidden="true">
-        <span className="skeleton" style={{ height: 34, width: '52%' }} />
-        <span className="skeleton" style={{ height: 12, width: '70%' }} />
-      </div>
-    );
-  } else if (loadState === 'error') {
-    body = (
-      <>
-        <div className="notice error">
-          <Icon name="alert" />
-          <span>{error ?? 'Beta credits are unavailable right now.'}</span>
-        </div>
+  if (disabled || blocked) return null;
+
+  if (loadState === 'error') {
+    return (
+      <div className="profile-strip">
+        <span className="text-tertiary">{error ?? 'Beta credits unavailable.'}</span>
         <button
           type="button"
-          className="btn btn-ghost btn-sm"
-          onClick={() => address && void load(address)}
+          className="btn btn-ghost btn-xs"
+          onClick={() => void load(address)}
         >
-          Try again
+          Retry
         </button>
-      </>
-    );
-  } else if (disabled) {
-    body = (
-      <p className="beta-copy">
-        Beta credit claims are paused. Your existing test-USDC still works in the
-        arena.
-      </p>
-    );
-  } else if (blocked) {
-    body = (
-      <div className="notice error">
-        <Icon name="alert" />
-        <span>This wallet is not eligible for beta credits.</span>
       </div>
     );
-  } else if (confirmed) {
-    body = (
-      <>
-        <div className="notice success">
-          <Icon name="check" />
-          <span>
-            Funded{status ? ` with ${status.limits.starterUsdc} test-USDC + ${status.limits.starterSol} SOL` : ''}.
-            Open the arena and take your first position.
+  }
+
+  if (confirmed) {
+    if (!canTopUp) return null;
+    return (
+      <div className="profile-strip">
+        <div className="profile-strip-label">
+          <span>Top up test-USDC</span>
+          <span className="mono text-tertiary">
+            ${remaining.toFixed(0)} daily limit left
           </span>
         </div>
-        <div className="beta-meta">
-          <span className="mono">{address ? shortAddress(address, 6) : ''}</span>
-          <span className="mono">{usdcBalance.toFixed(2)} test-USDC in wallet</span>
-          {explorerUrl ? (
-            <a className="link" href={explorerUrl} target="_blank" rel="noreferrer">
-              View grant transaction
+        <div className="profile-strip-controls">
+          <div className="quick-amounts">
+            {topUpOptions.map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={`quick-chip${effectiveTopUp === value ? ' active' : ''}`}
+                onClick={() => setTopUpAmount(value)}
+                disabled={topUpBusy}
+              >
+                +${value}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="btn btn-secondary btn-xs"
+            onClick={() => void handleTopUp()}
+            disabled={topUpBusy || effectiveTopUp < minTopUp}
+          >
+            {topUpBusy ? <span className="spinner" /> : null}
+            {topUpState === 'signing'
+              ? 'Sign in wallet…'
+              : topUpState === 'sending'
+                ? 'Adding…'
+                : `Add $${effectiveTopUp} · ${(effectiveTopUp / rate).toFixed(3)} SOL`}
+          </button>
+          {topUpExplorer ? (
+            <a
+              className="icon-btn"
+              href={topUpExplorer}
+              target="_blank"
+              rel="noreferrer"
+              aria-label="View top-up transaction"
+            >
+              <Icon name="external" />
             </a>
           ) : null}
         </div>
-
-        {disabled ? null : canTopUp ? (
-          <div className="beta-topup">
-            <div className="beta-topup-head">
-              <span>Need more test credit?</span>
-              <span className="beta-topup-remaining">
-                {remaining.toFixed(2)} USDC left today
-              </span>
-            </div>
-            <div className="beta-form">
-              {topUpOptions.map((value) => (
-                <button
-                  key={value}
-                  type="button"
-                  className={`quick-chip${effectiveTopUp === value ? ' active' : ''}`}
-                  onClick={() => setTopUpAmount(value)}
-                  disabled={topUpBusy}
-                >
-                  +{value}
-                </button>
-              ))}
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={() => void handleTopUp()}
-                disabled={topUpBusy || effectiveTopUp < minTopUp}
-              >
-                {topUpBusy ? <span className="spinner" /> : null}
-                {topUpState === 'signing'
-                  ? 'Confirm in wallet'
-                  : topUpState === 'sending'
-                    ? 'Adding credit'
-                    : `Add ${effectiveTopUp.toFixed(2)} test-USDC · ≈ ${(effectiveTopUp / rate).toFixed(3)} SOL`}
-              </button>
-            </div>
-            <p className="beta-hint">
-              Paid from your Devnet SOL in a single step. One signature, no
-              separate conversion.
-            </p>
-            {topUpExplorer ? (
-              <div className="beta-meta">
-                <span>Test credit added.</span>
-                <a className="link" href={topUpExplorer} target="_blank" rel="noreferrer">
-                  View transaction
-                </a>
-              </div>
-            ) : null}
-            {topUpError ? (
-              <div className="notice error" style={{ marginTop: 10 }}>
-                <Icon name="alert" />
-                <span>{topUpError}</span>
-              </div>
-            ) : null}
+        {topUpError ? (
+          <div className="notice error" style={{ width: '100%', marginTop: 8 }}>
+            <Icon name="alert" />
+            <span>{topUpError}</span>
           </div>
-        ) : (
-          <p className="beta-hint">
-            {status && remaining < minTopUp
-              ? 'Daily top-up limit reached. Try again tomorrow.'
-              : 'Top-ups are unavailable while the beta float is being refilled.'}
-          </p>
-        )}
-      </>
-    );
-  } else if (pending) {
-    body = (
-      <>
-        <div className="notice">
-          <Icon name="clock" />
-          <span>Your grant is being confirmed on Devnet. This usually takes a few seconds.</span>
-        </div>
-        <button
-          type="button"
-          className="btn btn-ghost btn-sm"
-          onClick={() => address && void load(address)}
-        >
-          Refresh
-        </button>
-      </>
-    );
-  } else {
-    body = (
-      <>
-        <p className="beta-copy">
-          Private beta, invite only. One claim per wallet — you will sign a short
-          message to prove the wallet is yours.
-        </p>
-        <div className="beta-form">
-          <input
-            className="input mono"
-            type="text"
-            value={code}
-            onChange={(event) => setCode(event.target.value.toUpperCase())}
-            placeholder="FERAS-BETA-XXXXXXXX"
-            aria-label="Beta invite code"
-            spellCheck={false}
-            autoComplete="off"
-            disabled={busy}
-          />
-          <button
-            type="button"
-            className="btn btn-accent btn-sm"
-            onClick={() => void handleClaim()}
-            disabled={busy || !code.trim() || !status?.canClaim}
-          >
-            {busy ? <span className="spinner" /> : null}
-            {claimState === 'signing'
-              ? 'Confirm in wallet'
-              : claimState === 'sending'
-                ? 'Funding wallet'
-                : status
-                  ? `Claim ${status.limits.starterUsdc} test-USDC + ${status.limits.starterSol} SOL`
-                  : 'Claim beta credits'}
-          </button>
-        </div>
-        {status && !status.canClaim ? (
-          <p className="beta-hint">
-            {grant ? 'This wallet already has a grant in progress.' : 'The beta float is temporarily empty — try again in a few minutes.'}
-          </p>
         ) : null}
-      </>
+      </div>
+    );
+  }
+
+  if (pending) {
+    return (
+      <div className="profile-strip">
+        <div className="profile-strip-label">
+          <span className="spinner" />
+          <span className="text-secondary">
+            Sending {status ? `${status.limits.starterUsdc} USDC + ${status.limits.starterSol} SOL` : 'starter credits'} to your wallet…
+          </span>
+        </div>
+      </div>
     );
   }
 
   return (
-    <section className="card beta-card">
-      <div className="panel-head">
-        <div>
-          <div className="panel-title">Beta credits</div>
-          <div className="panel-sub">
-            Private beta · Devnet test credit · no monetary value
-          </div>
-        </div>
-        <span className={`chip${confirmed ? ' beta-chip-done' : ''}`}>
-          {confirmed ? (
-            <>
-              <Icon name="check" className="chip-icon" /> Claimed
-            </>
-          ) : (
-            'Invite only'
-          )}
+    <div className="profile-strip">
+      <div className="profile-strip-label">
+        <span>Starter credits</span>
+        <span className="text-tertiary">
+          {status
+            ? `${status.limits.starterUsdc} USDC + ${status.limits.starterSol} SOL`
+            : '25 USDC + 0.25 SOL'}
         </span>
       </div>
-
-      {body}
-
+      <div className="profile-strip-controls">
+        <button
+          type="button"
+          className="btn btn-accent btn-xs"
+          onClick={() => void handleManualGrantRetry()}
+        >
+          Claim free {status?.limits.starterUsdc ?? 25} USDC
+        </button>
+      </div>
       {claimError ? (
-        <div className="notice error" style={{ marginTop: 12 }}>
+        <div className="notice error" style={{ width: '100%', marginTop: 8 }}>
           <Icon name="alert" />
           <span>{claimError}</span>
         </div>
       ) : null}
-    </section>
+    </div>
   );
 }

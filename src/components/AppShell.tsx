@@ -18,7 +18,7 @@ export function AppShell() {
       <div className="nav-wrap">
         <nav className="nav" aria-label="Primary">
           <NavLink to="/" className="brand" aria-label="Feras overview">
-            <img className="brand-mark" src="/logo.png" alt="" />
+            <img className="brand-mark" src="/logo.png" alt="" width="28" height="28" fetchPriority="high" />
             <span className="brand-word">Feras</span>
           </NavLink>
 

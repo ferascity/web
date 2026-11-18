@@ -5,10 +5,11 @@ import { formatMultiplier, formatNumber, formatUsdc } from '../lib/format';
 import { useMatches } from '../lib/hooks/useMatches';
 
 export function Overview() {
-  const { matches, error, loading, reload } = useMatches();
+  const { matches, error, loading, reload } = useMatches(undefined, 3);
 
   const liveMatches = matches.filter((match) => match.status === 'LIVE');
   const featured = liveMatches[0] ?? matches[0] ?? null;
+  const arenaMatches = matches.slice(0, 3);
 
   const agentIds = new Set<string>();
   let poolVolume = 0;
@@ -36,8 +37,7 @@ export function Overview() {
             <span className="hero-caret" aria-hidden="true" />
           </h1>
           <p className="hero-lede">
-            Watch autonomous chess agents fight, follow every move,
-            and take a position on the outcome.
+            Watch autonomous agents fight and take a position on the outcome.
           </p>
           <div className="hero-actions">
             <Link to="/arena" className="btn btn-primary">
@@ -87,27 +87,69 @@ export function Overview() {
               <Icon name="arrow-right" />
             </span>
           </Link>
+        ) : loading ? (
+          <div className="hero-ticker" aria-hidden="true">
+            <span className="skeleton" style={{ width: 84, height: 22, borderRadius: 999 }} />
+            <span className="skeleton" style={{ width: 148, height: 14 }} />
+            <span className="hero-ticker-divider" />
+            <span className="skeleton" style={{ width: 112, height: 14 }} />
+            <span className="hero-ticker-arrow">
+              <Icon name="arrow-right" />
+            </span>
+          </div>
         ) : null}
       </section>
 
       <div className="stats-strip">
         <div className="stat">
-          <div className="stat-value mono">{liveMatches.length}</div>
+          <div className="stat-value mono">
+            {loading && matches.length === 0 ? (
+              <span
+                className="skeleton"
+                style={{ display: 'inline-block', width: 32, height: 22, verticalAlign: 'middle' }}
+              />
+            ) : (
+              liveMatches.length
+            )}
+          </div>
           <div className="stat-label">Live matches</div>
         </div>
         <div className="stat">
-          <div className="stat-value mono">{agentIds.size}</div>
+          <div className="stat-value mono">
+            {loading && matches.length === 0 ? (
+              <span
+                className="skeleton"
+                style={{ display: 'inline-block', width: 32, height: 22, verticalAlign: 'middle' }}
+              />
+            ) : (
+              agentIds.size
+            )}
+          </div>
           <div className="stat-label">Agents</div>
         </div>
         <div className="stat">
           <div className="stat-value mono">
-            {formatUsdc(poolVolume, { compact: true })}
+            {loading && matches.length === 0 ? (
+              <span
+                className="skeleton"
+                style={{ display: 'inline-block', width: 58, height: 22, verticalAlign: 'middle' }}
+              />
+            ) : (
+              formatUsdc(poolVolume, { compact: true })
+            )}
           </div>
           <div className="stat-label">Pool volume</div>
         </div>
         <div className="stat">
           <div className="stat-value mono">
-            {formatNumber(viewers, { compact: true })}
+            {loading && matches.length === 0 ? (
+              <span
+                className="skeleton"
+                style={{ display: 'inline-block', width: 36, height: 22, verticalAlign: 'middle' }}
+              />
+            ) : (
+              formatNumber(viewers, { compact: true })
+            )}
           </div>
           <div className="stat-label">Watching now</div>
         </div>
@@ -151,9 +193,9 @@ export function Overview() {
               </div>
             ))}
           </div>
-        ) : matches.length > 0 ? (
+        ) : arenaMatches.length > 0 ? (
           <div className="match-grid">
-            {matches.map((match) => (
+            {arenaMatches.map((match) => (
               <MatchCard key={match.id} match={match} />
             ))}
           </div>

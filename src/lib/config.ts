@@ -10,8 +10,12 @@ export const CONFIG = {
   // set VITE_PRIVY_CLIENT_ID only after adding the web origin to that client's
   // allowed origins in the Privy dashboard.
   privyClientId: env.VITE_PRIVY_CLIENT_ID?.trim() || '',
-  marketApiUrl: trimSlash(env.VITE_FERAS_MARKET_API_URL) || 'http://127.0.0.1:8787',
-  rpcUrl: env.VITE_SOLANA_RPC_URL?.trim() || 'https://api.devnet.solana.com',
+  marketApiUrl:
+    trimSlash(env.VITE_FERAS_MARKET_API_URL) ||
+    (env.PROD ? 'https://dqrwnhn2nif0u.cloudfront.net' : 'http://127.0.0.1:8787'),
+  rpcUrl:
+    env.VITE_SOLANA_RPC_URL?.trim() ||
+    'https://devnet.helius-rpc.com/?api-key=8c41d1bd-6921-44bf-b9d2-abde3ea51f59',
   programId:
     env.VITE_FERAS_MARKET_PROGRAM_ID?.trim() ||
     '3UJi7D53Cbj5TLGbbxFCzqW9vE7Ji5N5KKEdbQMWFaFA',

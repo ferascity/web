@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { AgentRow } from '../components/AgentRow';
 import { ChessBoard } from '../components/ChessBoard';
@@ -11,7 +11,11 @@ import {
   formatUsdc,
 } from '../lib/format';
 import { getBetaStatus, type BetaStatus } from '../lib/api/beta';
-import { loadMatchReplay } from '../lib/api/matches';
+import {
+  loadMatch,
+  loadMatchReplay,
+  subscribeMatchEvents,
+} from '../lib/api/matches';
 import { useMatches } from '../lib/hooks/useMatches';
 import { useWallet } from '../lib/wallet';
 import type {
@@ -36,8 +40,37 @@ function outcomeLabel(outcome: MarketOutcome): string {
   return 'Draw';
 }
 
+function formatMoveLabel(step: MoveStep | null): string {
+  if (!step) return '';
+  const moveNum = Math.ceil(step.ply / 2);
+  return step.color === 'w' ? `${moveNum}. ${step.san}` : `${moveNum}… ${step.san}`;
+}
+
+function formatCountdown(msRemaining: number): string {
+  const totalSec = Math.max(0, Math.ceil(msRemaining / 1000));
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  if (mins >= 60) {
+    const hours = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    return `${hours}h ${remMins}m`;
+  }
+  if (mins > 0) {
+    return `${mins}m ${String(secs).padStart(2, '0')}s`;
+  }
+  return `${secs}s`;
+}
+
+function mergeMoves(existing: MoveStep[], incoming: MoveStep[]): MoveStep[] {
+  if (incoming.length === 0) return existing;
+  const byPly = new Map<number, MoveStep>();
+  for (const step of existing) byPly.set(step.ply, step);
+  for (const step of incoming) byPly.set(step.ply, step);
+  return [...byPly.values()].sort((a, b) => a.ply - b.ply);
+}
+
 export function Arena() {
-  const { matches, loading, error: apiError, reload } = useMatches();
+  const { matches, loading, error: apiError, reload } = useMatches(undefined, 24);
   const [searchParams, setSearchParams] = useSearchParams();
   const {
     authenticated,
@@ -51,7 +84,45 @@ export function Arena() {
   } = useWallet();
 
   const requestedId = searchParams.get('match');
-  const match = matches.find((item) => item.id === requestedId) ?? matches[0] ?? null;
+  const [deepLinkedMatch, setDeepLinkedMatch] = useState<Match | null>(null);
+  const [liveSnapshot, setLiveSnapshot] = useState<Match | null>(null);
+
+  useEffect(() => {
+    if (!requestedId || loading) {
+      setDeepLinkedMatch(null);
+      return;
+    }
+    if (matches.some((item) => item.id === requestedId)) {
+      setDeepLinkedMatch(null);
+      return;
+    }
+    let cancelled = false;
+    loadMatch(requestedId)
+      .then((result) => {
+        if (!cancelled) setDeepLinkedMatch(result);
+      })
+      .catch(() => {
+        if (!cancelled) setDeepLinkedMatch(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [requestedId, loading, matches]);
+
+  const baseMatch =
+    matches.find((item) => item.id === requestedId) ??
+    deepLinkedMatch ??
+    matches[0] ??
+    null;
+
+  const match: Match | null =
+    baseMatch && liveSnapshot && liveSnapshot.id === baseMatch.id
+      ? {
+          ...baseMatch,
+          ...liveSnapshot,
+          currentPly: Math.max(baseMatch.currentPly, liveSnapshot.currentPly),
+        }
+      : baseMatch;
 
   const [replayMoves, setReplayMoves] = useState<MoveStep[]>([]);
   const [replayStatus, setReplayStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>(
@@ -61,6 +132,8 @@ export function Arena() {
 
   const [ply, setPly] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const followLiveRef = useRef(true);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [outcome, setOutcome] = useState<MarketOutcome>('WHITE');
   const [amount, setAmount] = useState('5');
   const [pending, setPending] = useState(false);
@@ -93,27 +166,34 @@ export function Arena() {
     };
   }, [authenticated, address]);
 
-  const matchId = match?.id ?? null;
+  const matchId = baseMatch?.id ?? null;
+  const matchStatus = match?.status ?? null;
   const moveCount = moves.length;
 
-  // Replays are fetched only for the selected match. The list endpoint used to
-  // ship every analyzed move for every match, which made the arena wait on a
-  // 12 MB payload before it could render a board.
+  // Reset board & bet form state only when switching to a different match.
   useEffect(() => {
-    if (!match) {
-      setReplayMoves([]);
+    setLiveSnapshot(null);
+    setReplayMoves([]);
+    setPly(0);
+    setPlaying(false);
+    followLiveRef.current = true;
+    setOutcome('WHITE');
+    setSubmitError(null);
+    setReceipt(null);
+
+    if (!matchId) {
       setReplayStatus('idle');
       return;
     }
-    let cancelled = false;
-    setReplayMoves([]);
-    setReplayStatus(match.hasReplay ? 'loading' : 'ready');
-    if (!match.hasReplay) return;
 
-    loadMatchReplay(match.id)
+    let cancelled = false;
+    setReplayStatus('loading');
+
+    loadMatchReplay(matchId)
       .then((replay) => {
         if (cancelled) return;
         setReplayMoves(replay.moves);
+        setPly(replay.moves.length);
         setReplayStatus('ready');
       })
       .catch(() => {
@@ -124,24 +204,109 @@ export function Arena() {
     return () => {
       cancelled = true;
     };
-  }, [match]);
+  }, [matchId]);
 
+  // Keep the board at the latest move as live moves arrive unless the user
+  // scrubbed backward to inspect an earlier position.
   useEffect(() => {
-    setPly(moveCount);
-    setPlaying(false);
-    setOutcome('WHITE');
-    setSubmitError(null);
-    setReceipt(null);
-  }, [matchId, moveCount]);
+    if (followLiveRef.current && !playing) {
+      setPly(moveCount);
+    }
+  }, [moveCount, playing]);
+
+  // Subscribe to real-time SSE move/completion events + periodic match sync
+  // while the selected match is UPCOMING or LIVE.
+  useEffect(() => {
+    if (!matchId || matchStatus === 'COMPLETED') return;
+
+    let cancelled = false;
+    const unsubscribe = subscribeMatchEvents(matchId, {
+      after: 0,
+      onMove: ({ step }) => {
+        if (cancelled) return;
+        setReplayMoves((prev) => mergeMoves(prev, [step]));
+        setReplayStatus('ready');
+        setLiveSnapshot((prev) => {
+          const base = prev && prev.id === matchId ? prev : baseMatch;
+          if (!base) return prev;
+          return {
+            ...base,
+            status: 'LIVE',
+            currentPly: Math.max(base.currentPly, step.ply),
+            moveCount: Math.max(base.moveCount ?? 0, step.ply),
+            currentFen: step.fen,
+            evalScore:
+              step.evalCentipawns != null
+                ? step.evalCentipawns / 100
+                : base.evalScore,
+            hasReplay: true,
+          };
+        });
+      },
+      onCompleted: ({ result }) => {
+        if (cancelled) return;
+        setLiveSnapshot((prev) => {
+          const base = prev && prev.id === matchId ? prev : baseMatch;
+          if (!base) return prev;
+          return {
+            ...base,
+            status: 'COMPLETED',
+            result: result ?? base.result,
+          };
+        });
+        reload();
+      },
+    });
+
+    const syncActiveMatch = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      loadMatch(matchId)
+        .then((fresh) => {
+          if (cancelled || !fresh) return;
+          setLiveSnapshot(fresh);
+          if (fresh.replay.moves.length > 0) {
+            setReplayMoves((prev) => mergeMoves(prev, fresh.replay.moves));
+            setReplayStatus('ready');
+          }
+        })
+        .catch(() => {
+          // Keep existing state on transient network hiccups.
+        });
+    };
+
+    const pollTimer = window.setInterval(syncActiveMatch, 4_000);
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      window.clearInterval(pollTimer);
+    };
+  }, [matchId, matchStatus, baseMatch, reload]);
+
+  // Update countdown timer every second while a lock time is approaching.
+  useEffect(() => {
+    if (!match?.marketLockTime || match.status === 'COMPLETED') return;
+    const timer = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [match?.marketLockTime, match?.status]);
 
   useEffect(() => {
     if (!playing) return;
     if (ply >= moveCount) {
       setPlaying(false);
+      followLiveRef.current = true;
       return;
     }
     const timer = window.setTimeout(() => {
-      setPly((value) => Math.min(value + 1, moveCount));
+      setPly((value) => {
+        const next = Math.min(value + 1, moveCount);
+        if (next >= moveCount) followLiveRef.current = true;
+        return next;
+      });
     }, 850);
     return () => window.clearTimeout(timer);
   }, [playing, ply, moveCount]);
@@ -212,6 +377,7 @@ export function Arena() {
   }
 
   const activeMove = ply > 0 ? moves[ply - 1] : null;
+  const moveLabel = formatMoveLabel(activeMove);
   const fen = activeMove
     ? activeMove.fen
     : moves.length > 0
@@ -231,11 +397,27 @@ export function Arena() {
       : 1 / (1 + Math.pow(10, -evalScore / 4));
   const whitePct = Math.max(0, Math.min(1, winProbability));
 
+  const lockTimeMs = match.marketLockTime
+    ? new Date(match.marketLockTime).getTime()
+    : null;
+  const msUntilLock =
+    lockTimeMs != null && Number.isFinite(lockTimeMs) ? lockTimeMs - nowMs : null;
+  const lockTimePassed = msUntilLock != null && msUntilLock <= 0;
+  const marketCancelled = match.marketStatus === 'CANCELLED';
+  const marketSettled =
+    match.status === 'COMPLETED' ||
+    match.marketStatus === 'SETTLED' ||
+    match.marketStatus === 'CLOSED';
+  const marketLocked =
+    !marketSettled &&
+    !marketCancelled &&
+    (match.marketStatus === 'LOCKED' || lockTimePassed);
+
   const stake = Number.parseFloat(amount);
   const validStake = Number.isFinite(stake) && stake >= 0.01;
   const multiplier = multiplierFor(match, outcome);
   const estimatedReturn = validStake ? stake * multiplier : 0;
-  const tradable = match.status !== 'COMPLETED';
+  const tradable = !marketSettled && !marketCancelled && !marketLocked;
   const balancePending = Boolean(address) && balanceStatus === 'loading';
   const insufficient =
     balanceStatus === 'ready' && validStake && usdcBalance < stake;
@@ -305,6 +487,11 @@ export function Arena() {
       const result = await placePosition(draft);
       setReceipt(result);
       setAmount('5');
+      loadMatch(match.id)
+        .then((fresh) => {
+          if (fresh) setLiveSnapshot(fresh);
+        })
+        .catch(() => {});
     } catch (error) {
       setSubmitError(
         error instanceof Error ? error.message : 'The position could not be placed.',
@@ -318,8 +505,12 @@ export function Arena() {
   let ctaLabel = 'Place position';
   if (!authenticated) ctaLabel = 'Sign in to take a position';
   else if (!address) ctaLabel = 'Preparing wallet…';
-  else if (!tradable) {
+  else if (marketCancelled) {
+    ctaLabel = 'Market cancelled';
+  } else if (marketSettled) {
     ctaLabel = 'Market settled';
+  } else if (marketLocked) {
+    ctaLabel = 'Market locked · match in play';
   } else if (balancePending) ctaLabel = 'Checking balance…';
   else if (!validStake) ctaLabel = 'Enter a stake';
   else if (insufficient) {
@@ -333,6 +524,14 @@ export function Arena() {
 
   const ctaDisabled = pending || (authenticated && !canSubmit);
 
+  let marketBadgeLabel = 'Open';
+  if (marketCancelled) marketBadgeLabel = 'Cancelled';
+  else if (marketSettled) marketBadgeLabel = 'Settled';
+  else if (marketLocked) marketBadgeLabel = 'Locked';
+  else if (msUntilLock != null && msUntilLock > 0) {
+    marketBadgeLabel = `Open · ${formatCountdown(msUntilLock)}`;
+  }
+
   return (
     <div className="page route-view arena-page">
       <div className="arena-grid">
@@ -344,14 +543,17 @@ export function Arena() {
                 {match.blackAgent.name}
               </div>
               <div className="arena-board-sub">
-                {match.timeControl} · Ply {match.currentPly}
-                {replayStatus === 'loading'
+                {match.timeControl} · Ply {Math.max(match.currentPly, moves.length)}
+                {moveLabel ? ` · ${moveLabel}` : ''}
+                {replayStatus === 'loading' && moves.length === 0
                   ? ' · Loading replay…'
-                  : replayStatus === 'error'
+                  : replayStatus === 'error' && moves.length === 0
                     ? ' · Replay unavailable'
-                    : moves.length === 0
-                      ? ' · No replay yet'
-                      : ''}
+                    : moves.length === 0 && match.status === 'UPCOMING' && msUntilLock && msUntilLock > 0
+                      ? ` · Starts in ${formatCountdown(msUntilLock)}`
+                      : moves.length === 0
+                        ? ' · Waiting for first move'
+                        : ''}
               </div>
             </div>
             <div className="arena-board-tools">
@@ -383,7 +585,11 @@ export function Arena() {
                 <button
                   type="button"
                   className="control-btn"
-                  onClick={() => setPly(0)}
+                  onClick={() => {
+                    followLiveRef.current = false;
+                    setPlaying(false);
+                    setPly(0);
+                  }}
                   disabled={moves.length === 0 || ply === 0}
                   aria-label="Go to the starting position"
                 >
@@ -392,7 +598,11 @@ export function Arena() {
                 <button
                   type="button"
                   className="control-btn"
-                  onClick={() => setPly((value) => Math.max(0, value - 1))}
+                  onClick={() => {
+                    followLiveRef.current = false;
+                    setPlaying(false);
+                    setPly((value) => Math.max(0, value - 1));
+                  }}
                   disabled={moves.length === 0 || ply === 0}
                   aria-label="Previous move"
                 >
@@ -402,6 +612,7 @@ export function Arena() {
                   type="button"
                   className="control-btn play"
                   onClick={() => {
+                    followLiveRef.current = false;
                     if (ply >= moves.length) setPly(0);
                     setPlaying((value) => !value);
                   }}
@@ -413,7 +624,14 @@ export function Arena() {
                 <button
                   type="button"
                   className="control-btn"
-                  onClick={() => setPly((value) => Math.min(moves.length, value + 1))}
+                  onClick={() => {
+                    setPlaying(false);
+                    setPly((value) => {
+                      const next = Math.min(moves.length, value + 1);
+                      followLiveRef.current = next >= moves.length;
+                      return next;
+                    });
+                  }}
                   disabled={moves.length === 0 || ply >= moves.length}
                   aria-label="Next move"
                 >
@@ -422,7 +640,11 @@ export function Arena() {
                 <button
                   type="button"
                   className="control-btn"
-                  onClick={() => setPly(moves.length)}
+                  onClick={() => {
+                    followLiveRef.current = true;
+                    setPlaying(false);
+                    setPly(moves.length);
+                  }}
                   disabled={moves.length === 0 || ply >= moves.length}
                   aria-label="Go to the current position"
                 >
@@ -432,7 +654,7 @@ export function Arena() {
 
               <span className="ply-label">
                 {moves.length > 0
-                  ? `Ply ${ply} / ${moves.length}`
+                  ? `Ply ${ply} / ${moves.length}${moveLabel ? ` · ${moveLabel}` : ''}`
                   : match.currentPly > 0
                     ? `Ply ${match.currentPly}`
                     : 'Not started'}
@@ -484,8 +706,8 @@ export function Arena() {
             <div className="rail-head">
               <span className="rail-title">Market</span>
               <span className="badge soft">
-                <span className={`dot${match.status === 'COMPLETED' ? '' : ' live'}`} />
-                {match.status === 'COMPLETED' ? 'Settled' : 'Open'}
+                <span className={`dot${tradable ? ' live' : ''}`} />
+                {marketBadgeLabel}
               </span>
             </div>
 

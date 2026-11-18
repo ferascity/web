@@ -221,4 +221,11 @@ ol {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+
+  /* Slow down the spinner rather than stopping it entirely so the user still
+     knows that an on-chain or API process is active. */
+  .btn .spinner {
+    animation-duration: 3s !important;
+    animation-iteration-count: infinite !important;
+  }
 }

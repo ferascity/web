@@ -2,7 +2,11 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Icon } from '../components/Icon';
 import { BetaCreditsCard } from '../components/BetaCreditsCard';
-import { getPositions, type SettlementKind } from '../lib/api/positions';
+import {
+  getCachedPositions,
+  getPositions,
+  type SettlementKind,
+} from '../lib/api/positions';
 import {
   formatMultiplier,
   formatRelativeTime,
@@ -19,12 +23,13 @@ export function Profile() {
     ready,
     authDelayed,
     authenticated,
+    walletLoading,
     address,
-    walletName,
     userLabel,
     solBalance,
     usdcBalance,
     balanceStatus,
+    balanceRefreshing,
     balanceError,
     refreshBalances,
     login,
@@ -35,8 +40,13 @@ export function Profile() {
   } = useWallet();
 
   const [copied, setCopied] = useState(false);
-  const [positions, setPositions] = useState<MarketPosition[]>([]);
-  const [positionsStatus, setPositionsStatus] = useState<AsyncStatus>('idle');
+  const [positions, setPositions] = useState<MarketPosition[]>(
+    () => getCachedPositions(address) ?? [],
+  );
+  const [positionsStatus, setPositionsStatus] = useState<AsyncStatus>(() =>
+    getCachedPositions(address) ? 'ready' : address ? 'loading' : 'idle',
+  );
+  const [positionsRefreshing, setPositionsRefreshing] = useState(false);
   const [positionsError, setPositionsError] = useState<string | null>(null);
   const [positionsNonce, setPositionsNonce] = useState(0);
 
@@ -55,12 +65,20 @@ export function Profile() {
     if (!address) {
       setPositions([]);
       setPositionsStatus('idle');
+      setPositionsRefreshing(false);
       setPositionsError(null);
       return;
     }
 
     let cancelled = false;
-    setPositionsStatus('loading');
+    const cached = getCachedPositions(address);
+    if (cached) {
+      setPositions(cached);
+      setPositionsStatus('ready');
+      setPositionsRefreshing(true);
+    } else {
+      setPositionsStatus('loading');
+    }
     setPositionsError(null);
 
     getPositions(address)
@@ -68,10 +86,14 @@ export function Profile() {
         if (cancelled) return;
         setPositions(list);
         setPositionsStatus('ready');
+        setPositionsRefreshing(false);
       })
       .catch((error: unknown) => {
         if (cancelled) return;
-        setPositionsStatus('error');
+        setPositionsRefreshing(false);
+        if (!getCachedPositions(address)) {
+          setPositionsStatus('error');
+        }
         setPositionsError(
           error instanceof Error
             ? error.message
@@ -101,9 +123,7 @@ export function Profile() {
     try {
       const signature = await requestDevnetSol();
       setAirdropStatus('ready');
-      setAirdropMessage(
-        `1 SOL requested from the Devnet faucet · ${shortAddress(signature, 6)}`,
-      );
+      setAirdropMessage(`+1 SOL funded · ${shortAddress(signature, 6)}`);
     } catch (error) {
       setAirdropStatus('error');
       setAirdropMessage(
@@ -121,8 +141,8 @@ export function Profile() {
         tone: 'success',
         text:
           kind === 'refund'
-            ? `Refund confirmed on-chain · ${shortAddress(receipt.signature ?? '', 6)}`
-            : `Payout claimed on-chain · ${shortAddress(receipt.signature ?? '', 6)}`,
+            ? `Refund confirmed · ${shortAddress(receipt.signature ?? '', 6)}`
+            : `Payout claimed · ${shortAddress(receipt.signature ?? '', 6)}`,
       });
       setPositionsNonce((value) => value + 1);
       refreshBalances();
@@ -139,7 +159,8 @@ export function Profile() {
     }
   };
 
-  const handleCreateWallet = async () => {    setWalletStatus('loading');
+  const handleCreateWallet = async () => {
+    setWalletStatus('loading');
     setWalletMessage(null);
     try {
       await createWallet();
@@ -152,29 +173,18 @@ export function Profile() {
     }
   };
 
-  // Only wait on Privy while restoring an existing session. Signed-out
-  // visitors should see the sign-in card immediately instead of skeletons
-  // that look like an empty page.
-  if (!ready && authenticated) {
+  const handleRefreshAll = () => {
+    refreshBalances();
+    setPositionsNonce((value) => value + 1);
+  };
+
+  if (!ready) {
     return (
-      <div className="page route-view">
-        <div className="page-head">
-          <div>
-            <span className="eyebrow">Profile · Solana Devnet</span>
-            <h1>Your arena identity.</h1>
-            <p className="lede">Wallet, balances, and market positions.</p>
-          </div>
-        </div>
-        <div className="profile-grid">
-          <div className="card wallet-panel">
-            <div className="skeleton" style={{ height: 18, width: '40%' }} />
-            <div className="skeleton" style={{ height: 46, marginTop: 18 }} />
-            <div className="skeleton" style={{ height: 84, marginTop: 12 }} />
-          </div>
-          <div className="card positions-panel">
-            <div className="skeleton" style={{ height: 18, width: '40%' }} />
-            <div className="skeleton" style={{ height: 120, marginTop: 18 }} />
-          </div>
+      <div className="page route-view profile-minimal">
+        <div className="profile-header-skeleton" aria-hidden="true">
+          <div className="skeleton" style={{ height: 28, width: 220 }} />
+          <div className="skeleton" style={{ height: 64, marginTop: 24, borderRadius: 12 }} />
+          <div className="skeleton" style={{ height: 180, marginTop: 32, borderRadius: 12 }} />
         </div>
       </div>
     );
@@ -182,23 +192,13 @@ export function Profile() {
 
   if (!authenticated) {
     return (
-      <div className="page route-view">
-        <div className="page-head">
-          <div>
-            <span className="eyebrow">Profile · Solana Devnet</span>
-            <h1>Your arena identity.</h1>
-            <p className="lede">
-              Wallet, balances, and market positions tied to your Privy account.
-            </p>
-          </div>
-        </div>
-
+      <div className="page route-view profile-minimal">
         <div className="card profile-signed-out">
-          <img src="/logo.png" alt="" />
-          <h2>Sign in to continue</h2>
+          <img src="/logo.png" alt="" width="48" height="48" />
+          <h1>Sign in</h1>
           <p>
-            Use the same Privy account you use in the Feras app. Your Solana wallet
-            and positions will appear here.
+            Connect your Privy account to view your Devnet balances and settle
+            positions.
           </p>
           <button type="button" className="btn btn-primary btn-block" onClick={login}>
             Sign in with Privy
@@ -211,8 +211,7 @@ export function Profile() {
             <span>
               Privy could not initialize on this origin. Add{' '}
               <span className="mono">{window.location.origin}</span> to the allowed
-              origins in the Privy dashboard, then reload. Markets, replays, and
-              drafts stay available without sign-in.
+              origins in the Privy dashboard, then reload.
             </span>
           </div>
         ) : null}
@@ -223,321 +222,274 @@ export function Profile() {
   const explorerAddress = address
     ? `https://explorer.solana.com/address/${address}?cluster=devnet`
     : null;
+  const showPositionSkeletons =
+    positions.length === 0 && (positionsStatus === 'loading' || walletLoading);
+  const showEmptyPositions =
+    !walletLoading && positionsStatus === 'ready' && positions.length === 0;
+  const refreshingAny =
+    balanceStatus === 'loading' ||
+    balanceRefreshing ||
+    positionsStatus === 'loading' ||
+    positionsRefreshing;
 
   return (
-    <div className="page route-view">
-      <div className="page-head">
-        <div>
-          <span className="eyebrow">Profile · Solana Devnet</span>
-          <h1>Your arena identity.</h1>
-          <p className="lede">
-            Wallet, balances, and market positions tied to your Privy account.
-          </p>
-        </div>
-        <div className="page-head-actions">
-          <span className="chip">
-            <span className="dot live" />
-            {walletName ?? 'Privy'}
+    <div className="page route-view profile-minimal">
+      <header className="profile-top">
+        <div className="profile-user">
+          <span className="profile-avatar">
+            {(userLabel ?? 'F').trim().charAt(0).toUpperCase()}
           </span>
+          <div className="profile-user-meta">
+            <h1>{userLabel ?? 'Feras account'}</h1>
+            <div className="profile-address-line">
+              {address ? (
+                <>
+                  <button
+                    type="button"
+                    className="profile-address-btn mono"
+                    onClick={copyAddress}
+                    title="Copy Solana address"
+                  >
+                    {shortAddress(address, 6)}
+                    <Icon name={copied ? 'check' : 'copy'} size={12} />
+                    {copied ? <span className="copied-tag">Copied</span> : null}
+                  </button>
+                  {explorerAddress ? (
+                    <a
+                      className="profile-explorer-link"
+                      href={explorerAddress}
+                      target="_blank"
+                      rel="noreferrer"
+                      aria-label="View wallet on Solana Explorer"
+                    >
+                      <Icon name="external" size={12} />
+                    </a>
+                  ) : null}
+                </>
+              ) : (
+                <span className="text-tertiary">
+                  {walletLoading ? 'Restoring wallet…' : 'No Solana wallet'}
+                </span>
+              )}
+            </div>
+          </div>
         </div>
-      </div>
 
-      <div className="card profile-banner">
-        <span className="profile-avatar">
-          {(userLabel ?? 'F').trim().charAt(0).toUpperCase()}
-        </span>
-        <div className="profile-identity">
-          <h2>{userLabel ?? 'Feras account'}</h2>
-          <p>
-            {address
-              ? `Solana Devnet · ${shortAddress(address, 6)}`
-              : 'Preparing your Solana wallet…'}
-          </p>
-        </div>
-        <div className="profile-actions">
-          {address ? (
-            <button type="button" className="btn btn-secondary btn-sm" onClick={copyAddress}>
-              <Icon name={copied ? 'check' : 'copy'} className="btn-icon" />
-              {copied ? 'Copied' : 'Copy address'}
-            </button>
-          ) : null}
+        <div className="profile-top-actions">
           <button
             type="button"
-            className="btn btn-ghost btn-sm"
+            className="icon-btn"
+            onClick={handleRefreshAll}
+            disabled={!address || refreshingAny}
+            aria-label="Refresh balances and positions"
+            title="Refresh"
+          >
+            <Icon name="rewind" />
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost btn-xs"
             onClick={() => void logout()}
           >
-            <Icon name="logout" className="btn-icon" />
+            <Icon name="logout" size={14} />
             Sign out
           </button>
         </div>
-      </div>
+      </header>
 
-      <BetaCreditsCard />
+      <section className="profile-balances" aria-label="Wallet balances">
+        <div className="profile-metrics">
+          <div className="profile-metric">
+            <span className="profile-metric-label">Test-USDC</span>
+            <strong className="profile-metric-value mono">
+              {balanceStatus === 'loading' || walletLoading
+                ? '—'
+                : formatUsdc(usdcBalance)}
+            </strong>
+          </div>
+          <div className="profile-metric">
+            <span className="profile-metric-label">SOL</span>
+            <strong className="profile-metric-value mono">
+              {balanceStatus === 'loading' || walletLoading
+                ? '—'
+                : `${solBalance.toFixed(3)} SOL`}
+            </strong>
+          </div>
+        </div>
 
-      <div className="profile-grid">
-        <div className="card wallet-panel">
-          <div className="panel-head">
-            <div>
-              <div className="panel-title">Wallet</div>
-              <div className="panel-sub">Solana Devnet · {walletName ?? 'Privy embedded'}</div>
-            </div>
+        <div className="profile-balance-actions">
+          {!address && !walletLoading ? (
             <button
               type="button"
-              className="icon-btn"
-              onClick={refreshBalances}
-              disabled={balanceStatus === 'loading'}
-              aria-label="Refresh balances"
+              className="btn btn-accent btn-xs"
+              onClick={() => void handleCreateWallet()}
+              disabled={walletStatus === 'loading'}
             >
-              <Icon name="rewind" />
+              {walletStatus === 'loading' ? <span className="spinner" /> : null}
+              Create wallet
             </button>
-          </div>
-
-          <div className="wallet-address">
-            <span className="mono">{address ?? 'No Solana wallet yet'}</span>
-            <div className="wallet-address-actions">
-              {address ? (
-                <button
-                  type="button"
-                  className="icon-btn"
-                  onClick={copyAddress}
-                  aria-label="Copy wallet address"
-                >
-                  <Icon name={copied ? 'check' : 'copy'} />
-                </button>
-              ) : null}
-              {explorerAddress ? (
-                <a
-                  className="icon-btn"
-                  href={explorerAddress}
-                  target="_blank"
-                  rel="noreferrer"
-                  aria-label="View wallet on Solana Explorer"
-                >
-                  <Icon name="external" />
-                </a>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="balance-grid">
-            <div className="balance">
-              <div className="balance-label">SOL</div>
-              <div className="balance-value">
-                {balanceStatus === 'loading' ? '—' : solBalance.toFixed(3)}
-              </div>
-              <div className="balance-sub">Network fees</div>
-            </div>
-            <div className="balance">
-              <div className="balance-label">USDC</div>
-              <div className="balance-value">
-                {balanceStatus === 'loading' ? '—' : usdcBalance.toFixed(2)}
-              </div>
-              <div className="balance-sub">Devnet test-USDC</div>
-            </div>
-          </div>
-
-          {balanceError ? (
-            <div className="notice error" style={{ marginTop: 12 }}>
-              <Icon name="alert" />
-              <span>{balanceError}</span>
-            </div>
-          ) : null}
-
-          <div className="wallet-actions">
+          ) : (
             <button
               type="button"
-              className="btn btn-secondary btn-sm"
+              className="btn btn-secondary btn-xs"
               onClick={() => void handleAirdrop()}
               disabled={!address || airdropStatus === 'loading'}
             >
               {airdropStatus === 'loading' ? (
                 <span className="spinner" />
               ) : (
-                <Icon name="download" className="btn-icon" />
+                <Icon name="download" size={13} />
               )}
-              Request Devnet SOL
+              Faucet +1 SOL
             </button>
-            {!address ? (
-              <button
-                type="button"
-                className="btn btn-accent btn-sm"
-                onClick={() => void handleCreateWallet()}
-                disabled={walletStatus === 'loading'}
-              >
-                {walletStatus === 'loading' ? <span className="spinner" /> : null}
-                Create Solana wallet
-              </button>
-            ) : null}
-          </div>
-
-          {airdropMessage ? (
-            <div
-              className={`notice ${airdropStatus === 'error' ? 'error' : 'success'}`}
-              style={{ marginTop: 12 }}
-            >
-              <Icon name={airdropStatus === 'error' ? 'alert' : 'check'} />
-              <span>{airdropMessage}</span>
-            </div>
-          ) : null}
-
-          {walletMessage ? (
-            <div className="notice error" style={{ marginTop: 12 }}>
-              <Icon name="alert" />
-              <span>{walletMessage}</span>
-            </div>
-          ) : null}
-
-          <p className="market-note">
-            Devnet only. SOL is used for network fees; test-USDC is required to take
-            a market position.
-          </p>
+          )}
         </div>
+      </section>
 
-        <div className="card positions-panel">
-          <div className="panel-head">
-            <div>
-              <div className="panel-title">Positions</div>
-              <div className="panel-sub">
-                {positions.length > 0
-                  ? `${positions.length} opened market position${positions.length === 1 ? '' : 's'}`
-                  : 'Your market history'}
-              </div>
-            </div>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={() => setPositionsNonce((value) => value + 1)}
-              disabled={!address || positionsStatus === 'loading'}
-              aria-label="Refresh positions"
-            >
-              <Icon name="rewind" />
-            </button>
-          </div>
-
-          {positionsStatus === 'error' ? (
-            <div className="notice error">
-              <Icon name="alert" />
-              <span>{positionsError ?? 'Positions are unavailable right now.'}</span>
-            </div>
-          ) : null}
-
-          {settleNotice ? (
-            <div className={`notice${settleNotice.tone === 'error' ? ' error' : ''}`}>
-              <Icon name={settleNotice.tone === 'error' ? 'alert' : 'check'} />
-              <span>{settleNotice.text}</span>
-            </div>
-          ) : null}
-
-          {positionsStatus === 'loading' ? (
-            <div className="position-list">
-              {[0, 1, 2].map((index) => (
-                <div className="position-row" key={index} aria-hidden="true">
-                  <div className="skeleton" style={{ width: 46, height: 20 }} />
-                  <div className="position-main">
-                    <div className="skeleton" style={{ height: 13, width: '60%' }} />
-                    <div
-                      className="skeleton"
-                      style={{ height: 10, width: '40%', marginTop: 6 }}
-                    />
-                  </div>
-                  <div className="skeleton" style={{ width: 52, height: 28 }} />
-                </div>
-              ))}
-            </div>
-          ) : null}
-
-          {positionsStatus !== 'loading' &&
-          positionsStatus !== 'error' &&
-          positions.length === 0 ? (
-            <div className="empty" style={{ padding: '38px 12px' }}>
-              <span className="empty-icon">
-                <Icon name="target" />
-              </span>
-              <h3>No positions yet</h3>
-              <p>Take a position in the arena and it will appear here.</p>
-              <Link to="/arena" className="btn btn-secondary btn-sm">
-                Open arena
-              </Link>
-            </div>
-          ) : null}
-
-          {positions.length > 0 ? (
-            <div className="position-list">
-              {positions.map((position) => (
-                <div className="position-row" key={position.id}>
-                  <span className={`outcome-tag ${position.outcome.toLowerCase()}`}>
-                    {position.outcome}
-                  </span>
-                  <div className="position-main">
-                    <div className="position-title">{position.matchTitle}</div>
-                    <div className="position-meta">
-                      <span>{position.selectedAgentName}</span>
-                      <span>·</span>
-                      <span>{formatRelativeTime(position.placedAt)}</span>
-                      <span>·</span>
-                      <span>{position.status}</span>
-                    </div>
-                  </div>
-                  <div className="position-side">
-                    <div className="position-stake">{formatUsdc(position.stakeUsdc)}</div>
-                    <div
-                      className={`position-return${position.status === 'WON' ? ' won' : ''}`}
-                    >
-                      {position.status === 'WON' || position.status === 'CLAIMED'
-                        ? formatUsdc(position.payoutUsdc ?? position.estimatedReturnUsdc)
-                        : position.status === 'REFUNDED'
-                          ? formatUsdc(position.stakeUsdc)
-                          : formatMultiplier(position.estimatedMultiplier)}
-                    </div>
-                  </div>
-                  {position.canClaim || position.canRefund ? (
-                    <button
-                      type="button"
-                      className="btn btn-primary btn-sm position-settle"
-                      disabled={settlingId !== null}
-                      onClick={() =>
-                        handleSettle(position, position.canRefund ? 'refund' : 'claim')
-                      }
-                    >
-                      {settlingId === position.id ? <span className="spinner" /> : null}
-                      {settlingId === position.id
-                        ? position.canRefund
-                          ? 'Refunding'
-                          : 'Claiming'
-                        : position.canRefund
-                          ? 'Refund'
-                          : 'Claim'}
-                    </button>
-                  ) : null}
-                  {position.receipt.explorerUrl ? (
-                    <a
-                      className="icon-btn"
-                      href={position.receipt.explorerUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      aria-label="View position transaction"
-                    >
-                      <Icon name="external" />
-                    </a>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      </div>
-
-      <div className="card profile-foot">
-        <span>Devnet preview · Positions are non-custodial and settle on-chain.</span>
-        <a
-          className="link"
-          href="https://explorer.solana.com/?cluster=devnet"
-          target="_blank"
-          rel="noreferrer"
+      {balanceError || walletMessage || airdropMessage ? (
+        <div
+          className={`notice ${
+            balanceError || walletMessage || airdropStatus === 'error'
+              ? 'error'
+              : 'success'
+          }`}
+          style={{ marginTop: 12 }}
         >
-          Solana Explorer
-        </a>
-      </div>
+          <Icon
+            name={
+              balanceError || walletMessage || airdropStatus === 'error'
+                ? 'alert'
+                : 'check'
+            }
+          />
+          <span>{balanceError ?? walletMessage ?? airdropMessage}</span>
+        </div>
+      ) : null}
+
+      <BetaCreditsCard />
+
+      <section className="profile-positions" aria-label="Market positions">
+        <div className="profile-section-head">
+          <h2>Positions</h2>
+          {positions.length > 0 ? (
+            <span className="mono text-tertiary">{positions.length}</span>
+          ) : null}
+        </div>
+
+        {positionsStatus === 'error' ? (
+          <div className="notice error" style={{ marginBottom: 12 }}>
+            <Icon name="alert" />
+            <span>{positionsError ?? 'Positions are unavailable right now.'}</span>
+          </div>
+        ) : null}
+
+        {settleNotice ? (
+          <div
+            className={`notice${settleNotice.tone === 'error' ? ' error' : ' success'}`}
+            style={{ marginBottom: 12 }}
+          >
+            <Icon name={settleNotice.tone === 'error' ? 'alert' : 'check'} />
+            <span>{settleNotice.text}</span>
+          </div>
+        ) : null}
+
+        {showPositionSkeletons ? (
+          <div className="position-list">
+            {[0, 1, 2].map((index) => (
+              <div className="position-row" key={index} aria-hidden="true">
+                <div className="skeleton" style={{ width: 46, height: 20 }} />
+                <div className="position-main">
+                  <div className="skeleton" style={{ height: 13, width: '48%' }} />
+                  <div
+                    className="skeleton"
+                    style={{ height: 10, width: '32%', marginTop: 6 }}
+                  />
+                </div>
+                <div className="skeleton" style={{ width: 56, height: 28 }} />
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {showEmptyPositions ? (
+          <div className="profile-empty">
+            <p>No positions yet.</p>
+            <Link to="/arena" className="btn btn-secondary btn-xs">
+              Open arena
+              <Icon name="arrow-right" size={12} />
+            </Link>
+          </div>
+        ) : null}
+
+        {positions.length > 0 ? (
+          <div className="position-list">
+            {positions.map((position) => (
+              <div className="position-row" key={position.id}>
+                <span className={`outcome-tag ${position.outcome.toLowerCase()}`}>
+                  {position.outcome}
+                </span>
+                <div className="position-main">
+                  <Link
+                    to={`/arena?match=${encodeURIComponent(position.matchId)}`}
+                    className="position-title"
+                  >
+                    {position.matchTitle}
+                  </Link>
+                  <div className="position-meta">
+                    <span>{position.selectedAgentName}</span>
+                    <span>·</span>
+                    <span>{formatRelativeTime(position.placedAt)}</span>
+                    <span>·</span>
+                    <span>{position.status}</span>
+                  </div>
+                </div>
+                <div className="position-side">
+                  <div className="position-stake">{formatUsdc(position.stakeUsdc)}</div>
+                  <div
+                    className={`position-return${position.status === 'WON' ? ' won' : ''}`}
+                  >
+                    {position.status === 'WON' || position.status === 'CLAIMED'
+                      ? formatUsdc(position.payoutUsdc ?? position.estimatedReturnUsdc)
+                      : position.status === 'REFUNDED' || position.status === 'CANCELLED'
+                        ? formatUsdc(position.stakeUsdc)
+                        : formatMultiplier(position.estimatedMultiplier)}
+                  </div>
+                </div>
+                {position.canClaim || position.canRefund ? (
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-xs position-settle"
+                    disabled={settlingId !== null}
+                    onClick={() =>
+                      handleSettle(position, position.canRefund ? 'refund' : 'claim')
+                    }
+                  >
+                    {settlingId === position.id ? <span className="spinner" /> : null}
+                    {settlingId === position.id
+                      ? position.canRefund
+                        ? 'Refunding'
+                        : 'Claiming'
+                      : position.canRefund
+                        ? 'Refund'
+                        : 'Claim'}
+                  </button>
+                ) : null}
+                {position.receipt.explorerUrl ? (
+                  <a
+                    className="icon-btn"
+                    href={position.receipt.explorerUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label="View position transaction"
+                  >
+                    <Icon name="external" />
+                  </a>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </section>
     </div>
   );
 }

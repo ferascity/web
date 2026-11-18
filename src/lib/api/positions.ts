@@ -166,6 +166,9 @@ function normalizePosition(value: unknown): MarketPosition | null {
   const raw = value as Record<string, unknown>;
   if (typeof raw.id !== 'string') return null;
   const receipt = (raw.receipt ?? {}) as Record<string, unknown>;
+  const status = normalizeStatus(raw.status);
+  const claimed = raw.claimed === true;
+  const refunded = raw.refunded === true;
   return {
     id: raw.id,
     matchId: typeof raw.matchId === 'string' ? raw.matchId : '',
@@ -176,15 +179,18 @@ function normalizePosition(value: unknown): MarketPosition | null {
     outcome: normalizeOutcome(raw.outcome),
     stakeUsdc: typeof raw.stakeUsdc === 'number' ? raw.stakeUsdc : 0,
     estimatedMultiplier:
-      typeof raw.estimatedMultiplier === 'number' ? raw.estimatedMultiplier : 0,
+      typeof raw.estimatedMultiplier === 'number' && raw.estimatedMultiplier >= 0.01
+        ? raw.estimatedMultiplier
+        : 0,
     estimatedReturnUsdc:
       typeof raw.estimatedReturnUsdc === 'number' ? raw.estimatedReturnUsdc : 0,
     payoutUsdc: typeof raw.payoutUsdc === 'number' ? raw.payoutUsdc : undefined,
-    status: normalizeStatus(raw.status),
-    claimed: raw.claimed === true,
-    refunded: raw.refunded === true,
+    status,
+    claimed,
+    refunded,
     canClaim: raw.canClaim === true,
-    canRefund: raw.canRefund === true,
+    canRefund:
+      raw.canRefund === true || (status === 'CANCELLED' && !claimed && !refunded),
     claimDeadline:
       typeof raw.claimDeadline === 'string' ? raw.claimDeadline : undefined,
     placedAt: typeof raw.placedAt === 'string' ? raw.placedAt : new Date(0).toISOString(),
@@ -195,6 +201,13 @@ function normalizePosition(value: unknown): MarketPosition | null {
       cluster: 'devnet',
     },
   };
+}
+
+const positionsCache = new Map<string, MarketPosition[]>();
+
+export function getCachedPositions(owner: string | null): MarketPosition[] | null {
+  if (!owner) return null;
+  return positionsCache.get(owner) ?? null;
 }
 
 export async function getPositions(owner: string): Promise<MarketPosition[]> {
@@ -209,9 +222,11 @@ export async function getPositions(owner: string): Promise<MarketPosition[]> {
   if (!Array.isArray(payload)) {
     throw new Error('Market API returned an invalid position list.');
   }
-  return payload
+  const list = payload
     .map(normalizePosition)
     .filter((position): position is MarketPosition => position !== null);
+  positionsCache.set(owner, list);
+  return list;
 }
 
 export type SettlementKind = 'claim' | 'refund';
