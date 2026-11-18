@@ -197,11 +197,11 @@ export function Profile() {
           <img src="/logo.png" alt="" width="48" height="48" />
           <h1>Sign in</h1>
           <p>
-            Connect your Privy account to view your Devnet balances and settle
+            Connect your account to view your balances and settle
             positions.
           </p>
           <button type="button" className="btn btn-primary btn-block" onClick={login}>
-            Sign in with Privy
+            Sign In
           </button>
         </div>
 

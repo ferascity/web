@@ -30,6 +30,8 @@ export type IconName =
   | 'search'
   | 'lock'
   | 'download'
+  | 'close'
+  | 'mail'
   | 'x'
   | 'github'
   | 'youtube';
@@ -151,6 +153,13 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <path d="M12 3v12M7 11l5 5 5-5" />
       <path d="M4 21h16" />
+    </>
+  ),
+  close: <path d="M18 6 6 18M6 6l12 12" />,
+  mail: (
+    <>
+      <rect x="2" y="4" width="20" height="16" rx="2" />
+      <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
     </>
   ),
   x: (

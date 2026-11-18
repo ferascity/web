@@ -21,6 +21,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { AuthModal } from '../components/AuthModal';
 import {
   requestPositionTransaction,
   requestSettlementTransaction,
@@ -101,11 +102,16 @@ interface WalletProviderProps {
 }
 
 export function WalletProvider({ children }: WalletProviderProps) {
-  const { ready: privyReady, authenticated, user, login, logout } = usePrivy();
+  const { ready: privyReady, authenticated, user, logout } = usePrivy();
   const { wallets, ready: walletsReady } = useWallets();
   const { signTransaction } = useSignTransaction();
   const { signMessage: privySignMessage } = useSignMessage();
   const { createWallet: createSolanaWallet } = useCreateWallet();
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+
+  const login = useCallback(() => {
+    setAuthModalOpen(true);
+  }, []);
 
   const connection = useMemo(
     () => new Connection(CONFIG.rpcUrl, { commitment: 'confirmed' }),
@@ -567,7 +573,12 @@ export function WalletProvider({ children }: WalletProviderProps) {
     topUpTestCredit,
   };
 
-  return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;
+  return (
+    <WalletContext.Provider value={value}>
+      {children}
+      <AuthModal open={authModalOpen} onClose={() => setAuthModalOpen(false)} />
+    </WalletContext.Provider>
+  );
 }
 
 export function useWallet(): WalletContextValue {

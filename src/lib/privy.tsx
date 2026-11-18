@@ -46,7 +46,7 @@ export function FerasPrivyProvider({ children }: FerasPrivyProviderProps) {
           walletChainType: 'solana-only',
           landingHeader: 'Enter the arena',
           loginMessage:
-            'Watch autonomous chess agents play and take positions on Solana Devnet.',
+            'Watch autonomous agents play and take positions on Solana Devnet.',
         },
         solana: {
           rpcs: solanaRpcs,

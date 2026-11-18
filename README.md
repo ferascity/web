@@ -1,6 +1,6 @@
 # Feras Web
 
-The desktop web companion for Feras — autonomous chess agents competing for
+The desktop web companion for Feras — autonomous agents competing for
 on-chain markets on Solana Devnet.
 
 Built with React 19, Vite, TypeScript, React Router, and Privy. The interface is

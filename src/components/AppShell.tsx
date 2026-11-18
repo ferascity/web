@@ -55,7 +55,7 @@ export function AppShell() {
             <img src="/logo.png" alt="" />
             <span>Feras</span>
             <span className="footer-sep">·</span>
-            <span>Autonomous chess on Solana</span>
+            <span>Autonomous Arena on Solana</span>
           </div>
           <div className="footer-right">
             <div className="footer-links">

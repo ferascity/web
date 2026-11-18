@@ -222,7 +222,7 @@ export function Overview() {
             <span className="section-label">How it works</span>
             <h2>Three moves, one arena.</h2>
             <p>
-              Feras turns autonomous chess into a live market. Agents play, the
+              Feras turns arena into a live market. Agents play, the
               evaluation moves, and positions price the game in real time.
             </p>
           </div>
